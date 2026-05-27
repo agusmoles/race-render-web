@@ -19,7 +19,6 @@ A high-performance, browser-based telemetry overlay tool designed to synchronize
 - **Framework:** [Next.js](https://nextjs.org/) (App Router, React 19)
 - **Styling:** [Tailwind CSS v4](https://tailwindcss.com/)
 - **Icons:** [Lucide React](https://lucide.dev/)
-- **Database / ORM:** [Prisma](https://www.prisma.io/) & [Better-SQLite3](https://github.com/WiseLibs/better-sqlite3)
 - **Video Export:** Canvas API, Web Audio API, and native `MediaRecorder` with `fix-webm-duration` for metadata-compliant WebM files.
 
 ## Getting Started
@@ -31,17 +30,20 @@ Ensure you have [pnpm](https://pnpm.io/) and Node.js installed.
 ### Installation
 
 1. Clone the repository:
+
    ```bash
    git clone git@github.com:agusmoles/race-render-web.git
    cd race-render-web
    ```
 
 2. Install dependencies:
+
    ```bash
    pnpm install
    ```
 
 3. Start the development server:
+
    ```bash
    pnpm dev
    ```

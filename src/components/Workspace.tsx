@@ -19,7 +19,7 @@ import {
   Volume2,
   VolumeX,
 } from "lucide-react";
-import { parseTelemetryCSV, ParsedTelemetry } from "@/lib/csv-helper";
+import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
 import Speedometer from "./gauges/Speedometer";
 import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
