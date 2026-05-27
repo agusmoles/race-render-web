@@ -1,35 +1,31 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
+import React, { useState } from "react";
 
 interface GForceRadarProps {
-  latAcc: number; // lateral acceleration in Gs
-  lonAcc: number; // longitudinal acceleration in Gs
+  latAcc: number;
+  lonAcc: number;
 }
 
 export default function GForceRadar({ latAcc = 0, lonAcc = 0 }: GForceRadarProps) {
-  // Store history of Gs to draw tail/trail effect
-  const historyRef = useRef<{ x: number; y: number }[]>([]);
+  const [prevG, setPrevG] = useState({ latAcc, lonAcc });
+  const [history, setHistory] = useState<{ x: number; y: number }[]>([]);
 
-  // Update trail history
-  useEffect(() => {
-    historyRef.current.push({ x: latAcc, y: lonAcc });
-    if (historyRef.current.length > 6) {
-      historyRef.current.shift();
-    }
-  }, [latAcc, lonAcc]);
+  if (latAcc !== prevG.latAcc || lonAcc !== prevG.lonAcc) {
+    setPrevG({ latAcc, lonAcc });
+    setHistory((prev) => {
+      const updated = [...prev, { x: latAcc, y: lonAcc }];
+      return updated.length > 6 ? updated.slice(updated.length - 6) : updated;
+    });
+  }
 
-  const maxG = 1.6; // Scale of radar
+  const maxG = 1.6;
   const center = 100;
   const radius = 80;
 
-  // Convert G values to SVG Coordinates
-  // Positive latAcc is right, negative is left
-  // Positive lonAcc is acceleration (up in graph) or braking (down in graph). Aim standard: LonAcc negative is braking (down).
   const getCoordinates = (gX: number, gY: number) => {
-    const x = center + (gX / maxG) * radius;
-    // In SVG, y axis goes down. So we invert gY so positive (acceleration) goes UP
-    const y = center - (gY / maxG) * radius;
+    const x = center - (gX / maxG) * radius;
+    const y = center + (gY / maxG) * radius;
     return {
       x: Math.max(center - radius, Math.min(center + radius, x)),
       y: Math.max(center - radius, Math.min(center + radius, y)),
@@ -39,75 +35,49 @@ export default function GForceRadar({ latAcc = 0, lonAcc = 0 }: GForceRadarProps
   const currentCoords = getCoordinates(latAcc, lonAcc);
 
   return (
-    <div className="flex flex-col items-center justify-center bg-zinc-900/85 backdrop-blur-md border border-zinc-800 rounded-2xl p-4 w-full h-full text-zinc-100 shadow-2xl relative select-none">
-      <div className="absolute top-2 left-3 text-[10px] uppercase tracking-wider text-zinc-500 font-sans">
-        G-Force
-      </div>
-      
-      <div className="absolute top-2 right-3 flex space-x-2 text-[9px] font-mono text-zinc-400">
-        <div>LAT: <span className="font-bold">{latAcc.toFixed(2)}G</span></div>
-        <div>LON: <span className="font-bold">{lonAcc.toFixed(2)}G</span></div>
+    <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
+      <div className="flex justify-center space-x-3 text-[9px] font-mono text-white/70 mb-1">
+        <div>LAT: <span className="font-bold text-white/90">{latAcc.toFixed(2)}G</span></div>
+        <div>LON: <span className="font-bold text-white/90">{lonAcc.toFixed(2)}G</span></div>
       </div>
 
-      <div className="relative w-36 h-36 mt-2">
+      <div className="relative w-36 h-36">
         <svg className="w-full h-full" viewBox="0 0 200 200">
-          {/* Outer circle 1.5G */}
           <circle
             cx={center}
             cy={center}
             r={radius}
             fill="none"
-            stroke="#27272a"
+            stroke="rgba(255,255,255,0.2)"
             strokeWidth={1}
             strokeDasharray="4 4"
           />
-          <text
-            x={center + radius - 12}
-            y={center - 4}
-            fill="#52525b"
-            fontSize="8"
-            className="font-mono font-bold"
-          >
-            1.5G
-          </text>
 
-          {/* Middle circle 1.0G */}
           <circle
             cx={center}
             cy={center}
             r={radius * (1.0 / maxG)}
             fill="none"
-            stroke="#3f3f46"
+            stroke="rgba(255,255,255,0.3)"
             strokeWidth={1}
           />
-          <text
-            x={center + radius * (1.0 / maxG) - 12}
-            y={center - 4}
-            fill="#52525b"
-            fontSize="8"
-            className="font-mono font-bold"
-          >
-            1.0G
-          </text>
 
-          {/* Inner circle 0.5G */}
           <circle
             cx={center}
             cy={center}
             r={radius * (0.5 / maxG)}
             fill="none"
-            stroke="#27272a"
+            stroke="rgba(255,255,255,0.15)"
             strokeWidth={1}
             strokeDasharray="2 2"
           />
 
-          {/* Crosshairs */}
           <line
             x1={center - radius}
             y1={center}
             x2={center + radius}
             y2={center}
-            stroke="#27272a"
+            stroke="rgba(255,255,255,0.18)"
             strokeWidth={1}
           />
           <line
@@ -115,14 +85,13 @@ export default function GForceRadar({ latAcc = 0, lonAcc = 0 }: GForceRadarProps
             y1={center - radius}
             x2={center}
             y2={center + radius}
-            stroke="#27272a"
+            stroke="rgba(255,255,255,0.18)"
             strokeWidth={1}
           />
 
-          {/* Trail / Tail circles */}
-          {historyRef.current.slice(0, -1).map((gPoint, index) => {
+          {history.slice(0, -1).map((gPoint, index) => {
             const coords = getCoordinates(gPoint.x, gPoint.y);
-            const opacity = (index + 1) / historyRef.current.length;
+            const opacity = (index + 1) / history.length;
             const size = 3 + opacity * 3;
             return (
               <circle
@@ -136,7 +105,6 @@ export default function GForceRadar({ latAcc = 0, lonAcc = 0 }: GForceRadarProps
             );
           })}
 
-          {/* Current G dot */}
           <circle
             cx={currentCoords.x}
             cy={currentCoords.y}

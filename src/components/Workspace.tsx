@@ -6,16 +6,12 @@ import {
   Pause,
   Upload,
   Layers,
-  Settings,
   RefreshCw,
   Sliders,
-  Flame,
   Download,
   Video,
   FileText,
   X,
-  ChevronLeft,
-  ChevronRight,
   Zap,
   MapPin,
   Flag,
@@ -25,6 +21,14 @@ import Speedometer from "./gauges/Speedometer";
 import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
 import TrackMap from "./gauges/TrackMap";
+
+interface WidgetLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  visible: boolean;
+}
 
 export default function Workspace() {
   // Local File Loading
@@ -59,11 +63,11 @@ export default function Workspace() {
 
   // HUD layout config
   const [isEditMode, setIsEditMode] = useState(false);
-  const [layoutConfig, setLayoutConfig] = useState<Record<string, any>>({
+  const [layoutConfig, setLayoutConfig] = useState<Record<string, WidgetLayout>>({
     speedometer: { x: 3, y: 70, w: 20, h: 25, visible: true },
-    rpmGauge: { x: 25, y: 88, w: 50, h: 10, visible: true },
-    gForceRadar: { x: 77, y: 70, w: 20, h: 25, visible: true },
-    trackMap: { x: 3, y: 3, w: 22, h: 30, visible: true },
+    rpmGauge: { x: 20, y: 72, w: 18, h: 23, visible: true },
+    gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
+    trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
   });
 
   // Video Ref & Playback state
@@ -204,9 +208,10 @@ export default function Workspace() {
         const parsed = parseTelemetryCSV(csvText);
         setLocalTelemetry(parsed);
         setChannelMapping(parsed.channelMapping);
-      } catch (err: any) {
-        console.error(err);
-        setUploadError("Error reading telemetry: " + err.message);
+      } catch (err) {
+        const error = err as Error;
+        console.error(error);
+        setUploadError("Error reading telemetry: " + error.message);
       } finally {
         setIsProcessing(false);
       }
@@ -482,7 +487,8 @@ export default function Workspace() {
     let audioStreamTrack: MediaStreamTrack | null = null;
     try {
       const audioCtx = new (
-        window.AudioContext || (window as any).webkitAudioContext
+        window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       )();
       const source = audioCtx.createMediaElementSource(exportVideo);
       const dest = audioCtx.createMediaStreamDestination();
@@ -639,26 +645,16 @@ export default function Workspace() {
       const wW = (layoutConfig.speedometer.w / 100) * width;
       const wH = (layoutConfig.speedometer.h / 100) * height;
 
-      // Draw background glass
-      ctx.fillStyle = "rgba(24, 24, 27, 0.85)";
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.9)";
-      ctx.lineWidth = 1.5;
-      drawRoundedRect(ctx, wX, wY, wW, wH, 12);
-      ctx.fill();
-      ctx.stroke();
-
-      // Draw arc
       const cx = wX + wW / 2;
       const cy = wY + wH / 2 + 5;
       const r = Math.min(wW, wH) * 0.35;
 
       ctx.beginPath();
       ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.8)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
       ctx.lineWidth = 8;
       ctx.stroke();
 
-      // Active speed arc
       const clampedPct = Math.min(1, Math.max(0, tel.speed / 260));
       const endAngle = 135 + clampedPct * 270;
       ctx.beginPath();
@@ -667,15 +663,13 @@ export default function Workspace() {
       ctx.lineWidth = 8;
       ctx.stroke();
 
-      // Digital digits
       ctx.fillStyle = "#ffffff";
       ctx.font = "bold 26px Orbitron, monospace";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(Math.round(tel.speed).toString(), cx, cy - 2);
 
-      // Label units
-      ctx.fillStyle = "#71717a";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
       ctx.font = "bold 9px Inter, sans-serif";
       ctx.fillText("KM/H", cx, cy + r - 10);
     }
@@ -687,56 +681,39 @@ export default function Workspace() {
       const wW = (layoutConfig.rpmGauge.w / 100) * width;
       const wH = (layoutConfig.rpmGauge.h / 100) * height;
 
-      ctx.fillStyle = "rgba(24, 24, 27, 0.85)";
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.9)";
-      ctx.lineWidth = 1.5;
-      drawRoundedRect(ctx, wX, wY, wW, wH, 10);
-      ctx.fill();
+      const cx = wX + wW / 2;
+      const cy = wY + wH / 2 + 3;
+      const r = Math.min(wW, wH) * 0.32;
+      const maxRpm = 15000;
+      const clampedPct = Math.min(1, Math.max(0, tel.rpm / maxRpm));
+
+      let arcColor = "#10b981";
+      if (clampedPct > 0.85) arcColor = "#f43f5e";
+      else if (clampedPct > 0.65) arcColor = "#fb923c";
+      else if (clampedPct > 0.45) arcColor = "#fbbf24";
+
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+      ctx.lineWidth = 6;
       ctx.stroke();
 
-      // RPM digital print
+      const endAngle = 135 + clampedPct * 270;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
+      ctx.strokeStyle = arcColor;
+      ctx.lineWidth = 6;
+      ctx.stroke();
+
       ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 12px Orbitron, monospace";
-      ctx.textAlign = "right";
-      ctx.fillText(
-        Math.round(tel.rpm).toString() + " RPM",
-        wX + wW - 15,
-        wY + 20,
-      );
+      ctx.font = "bold 18px Orbitron, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(Math.round(tel.rpm).toString(), cx, cy - 2);
 
-      // LED Segment blocks
-      const ledsCount = 20;
-      const activeCount = Math.round((tel.rpm / 10000) * ledsCount);
-      const ledBarX = wX + 15;
-      const ledBarY = wY + 26;
-      const ledBarW = wW - 30;
-      const ledBarH = 10;
-
-      const ledBlockW = (ledBarW - (ledsCount - 1) * 2) / ledsCount;
-
-      for (let i = 0; i < ledsCount; i++) {
-        const val = ((i + 1) / ledsCount) * 10000;
-        const isActive = i < activeCount;
-        let ledColor = "rgba(16, 185, 129, 0.15)"; // emerald dim
-
-        if (isActive) {
-          if (val >= 9500)
-            ledColor = "#60a5fa"; // blue shift flash
-          else if (val >= 8500)
-            ledColor = "#f43f5e"; // rose redline
-          else if (val >= 6000)
-            ledColor = "#fbbf24"; // amber high-rpm
-          else ledColor = "#10b981"; // emerald base
-        }
-
-        ctx.fillStyle = ledColor;
-        ctx.fillRect(
-          ledBarX + i * (ledBlockW + 2),
-          ledBarY,
-          ledBlockW,
-          ledBarH,
-        );
-      }
+      ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+      ctx.font = "bold 7px Inter, sans-serif";
+      ctx.fillText("RPM", cx, cy + r - 8);
     }
 
     // G-FORCE GAUGE DRAW
@@ -746,28 +723,31 @@ export default function Workspace() {
       const wW = (layoutConfig.gForceRadar.w / 100) * width;
       const wH = (layoutConfig.gForceRadar.h / 100) * height;
 
-      ctx.fillStyle = "rgba(24, 24, 27, 0.85)";
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.9)";
-      ctx.lineWidth = 1.5;
-      drawRoundedRect(ctx, wX, wY, wW, wH, 12);
-      ctx.fill();
-      ctx.stroke();
-
       const cx = wX + wW / 2;
       const cy = wY + wH / 2 + 5;
       const r = Math.min(wW, wH) * 0.35;
 
-      // Draw concentric G-rings
-      ctx.strokeStyle = "rgba(63, 63, 70, 0.4)";
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
       ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * 0.5, 0, 2 * Math.PI);
-      ctx.stroke(); // 0.5G
+      ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, 2 * Math.PI);
-      ctx.stroke(); // 1.0G
+      ctx.stroke();
 
-      // Draw crosshair axes
+      ctx.setLineDash([]);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * (1.0 / 1.6), 0, 2 * Math.PI);
+      ctx.stroke();
+
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * (0.5 / 1.6), 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
       ctx.beginPath();
       ctx.moveTo(cx - r, cy);
       ctx.lineTo(cx + r, cy);
@@ -775,16 +755,21 @@ export default function Workspace() {
       ctx.lineTo(cx, cy + r);
       ctx.stroke();
 
-      // Draw active G Force vector dot
-      const maxG = 1.5;
-      const gX = cx + (tel.latAcc / maxG) * r;
-      const gY = cy - (tel.lonAcc / maxG) * r;
+      const maxG = 1.6;
+      const gX = cx - (tel.latAcc / maxG) * r;
+      const gY = cy + (tel.lonAcc / maxG) * r;
 
       ctx.beginPath();
       ctx.arc(gX, gY, 5, 0, 2 * Math.PI);
       ctx.fillStyle = "#f43f5e";
       ctx.shadowColor = "#f43f5e";
       ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+
+      ctx.beginPath();
+      ctx.arc(gX, gY, 2, 0, 2 * Math.PI);
+      ctx.fillStyle = "#ffffff";
       ctx.fill();
     }
 

@@ -8,7 +8,7 @@ Before any Next.js work, find and read the relevant doc in `node_modules/next/di
 
 # General considerations
 
-- Use `caveman` full mode for the whole conversation.
+- Use `caveman` mode for the whole conversation.
 - Use `pnpm` as package manager and for running commands.
 - Use `shadcn` for UI components.
 - Use server actions instead of API routes.
