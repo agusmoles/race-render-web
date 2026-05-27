@@ -44,7 +44,7 @@ export default function RpmGauge({
       </div>
 
       {/* LED segments */}
-      <div className="flex items-center space-x-[3px] h-5 w-full bg-zinc-950 rounded-lg p-1 border border-zinc-850 overflow-hidden">
+      <div className="flex items-center space-x-0.75 h-5 w-full bg-zinc-950 rounded-lg p-1 border border-zinc-850 overflow-hidden">
         {Array.from({ length: totalLeds }).map((_, idx) => {
           const ledRpmValue = ((idx + 1) / totalLeds) * maxRpm;
           const isActive = idx < activeLeds;

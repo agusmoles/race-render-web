@@ -97,9 +97,9 @@ export default function TrackMap({
         Circuit Map
       </div>
 
-      <div className="relative w-full h-full flex items-center justify-center min-h-[140px] mt-2">
+      <div className="relative w-full h-full flex items-center justify-center min-h-35 mt-2">
         {hasGPS ? (
-          <svg className="w-full h-full max-w-[160px] max-h-[160px]" viewBox="0 0 160 160">
+          <svg className="w-full h-full max-w-40 max-h-40" viewBox="0 0 160 160">
             {/* Full Track outline */}
             <path
               d={pathData}
