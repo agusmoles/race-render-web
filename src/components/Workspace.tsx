@@ -16,12 +16,15 @@ import {
   MapPin,
   Flag,
   Maximize,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/lib/csv-helper";
 import Speedometer from "./gauges/Speedometer";
 import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
 import TrackMap from "./gauges/TrackMap";
+import LapTimer from "./gauges/LapTimer";
 
 interface WidgetLayout {
   x: number;
@@ -33,8 +36,10 @@ interface WidgetLayout {
 
 export default function Workspace() {
   // Local File Loading
-  const [videoFile, setVideoFile] = useState<File | null>(null);
-  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoFiles, setVideoFiles] = useState<File[]>([]);
+  const [videoUrls, setVideoUrls] = useState<string[]>([]);
+  const [videoDurations, setVideoDurations] = useState<number[]>([]);
+  const [activeVideoIndex, setActiveVideoIndex] = useState(0);
   const [csvFile, setCsvFile] = useState<File | null>(null);
 
   // High-performance Parsed Telemetry stored entirely in memory
@@ -69,6 +74,7 @@ export default function Workspace() {
     rpmGauge: { x: 20, y: 72, w: 18, h: 23, visible: true },
     gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
     trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
+    lapTimer: { x: 3, y: 3, w: 24, h: 16, visible: true },
   });
 
   // Video Ref & Playback state
@@ -77,6 +83,8 @@ export default function Workspace() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [volume, setVolume] = useState<number>(1.0);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
 
   // Export trim range
   const [prevVideoDuration, setPrevVideoDuration] = useState(0);
@@ -104,6 +112,7 @@ export default function Workspace() {
     lonAcc: 0,
     lat: 0,
     lon: 0,
+    lap: 1,
   });
 
   // Telemetry Sync Wizard Modal State
@@ -134,6 +143,71 @@ export default function Workspace() {
       timeUnitCorrected: localTelemetry.timeUnitCorrected,
     };
   }, [localTelemetry]);
+
+  const lapTimes = useMemo(() => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return { laps: {} as Record<number, number>, starts: {} as Record<number, number>, ends: {} as Record<number, number> };
+    const laps: Record<number, number> = {};
+    const starts: Record<number, number> = {};
+    const ends: Record<number, number> = {};
+
+    localTelemetry.rows.forEach((r) => {
+      if (r.lap === undefined || r.lap < 1) return;
+      if (starts[r.lap] === undefined || r.time < starts[r.lap]) {
+        starts[r.lap] = r.time;
+      }
+      if (ends[r.lap] === undefined || r.time > ends[r.lap]) {
+        ends[r.lap] = r.time;
+      }
+    });
+
+    const lapKeys = Object.keys(starts).map(Number).sort((a, b) => a - b);
+    lapKeys.forEach((k, idx) => {
+      if (idx < lapKeys.length - 1) {
+        laps[k] = starts[lapKeys[idx + 1]] - starts[k];
+      } else {
+        laps[k] = ends[k] - starts[k];
+      }
+    });
+
+    return { laps, starts, ends };
+  }, [localTelemetry]);
+
+  const bestLapInfo = useMemo(() => {
+    if (!lapTimes || !lapTimes.laps) return { lap: 0, time: 0 };
+    const lapKeys = Object.keys(lapTimes.laps).map(Number).sort((a, b) => a - b);
+    if (lapKeys.length === 0) return { lap: 0, time: 0 };
+
+    let bestLap = 0;
+    let bestTime = Infinity;
+
+    lapKeys.forEach((lapNum) => {
+      if (lapKeys.length > 2) {
+        if (lapNum === lapKeys[0] || lapNum === lapKeys[lapKeys.length - 1]) {
+          return;
+        }
+      } else if (lapKeys.length === 2) {
+        if (lapNum === lapKeys[0]) {
+          return;
+        }
+      }
+
+      const duration = lapTimes.laps[lapNum];
+      if (duration < bestTime && duration > 5) {
+        bestTime = duration;
+        bestLap = lapNum;
+      }
+    });
+
+    return bestTime === Infinity ? { lap: 0, time: 0 } : { lap: bestLap, time: bestTime };
+  }, [lapTimes]);
+
+  const formatLapTime = (secs: number) => {
+    if (isNaN(secs) || secs <= 0) return "0:00.00";
+    const mins = Math.floor(secs / 60);
+    const remainingSecs = Math.floor(secs % 60);
+    const centiseconds = Math.floor((secs % 1) * 100);
+    return `${mins}:${remainingSecs.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
+  };
 
   // Track map coordinates list
   const gpsPoints = useMemo(() => {
@@ -207,16 +281,36 @@ export default function Workspace() {
     }
   };
 
-  const handleVideoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setVideoFile(file);
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
+  const handleVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      videoUrls.forEach((url) => URL.revokeObjectURL(url));
+
+      const files = Array.from(e.target.files).sort((a, b) =>
+        a.name.localeCompare(b.name)
+      );
+      setVideoFiles(files);
+      const urls = files.map((f) => URL.createObjectURL(f));
+      setVideoUrls(urls);
+      setActiveVideoIndex(0);
       setIsPlaying(false);
       setCurrentTime(0);
       setExportStart(0);
       setExportEnd(0);
+
+      const durations = await Promise.all(
+        urls.map(
+          (url) =>
+            new Promise<number>((resolve) => {
+              const video = document.createElement("video");
+              video.preload = "metadata";
+              video.onloadedmetadata = () => resolve(video.duration);
+              video.src = url;
+            })
+        )
+      );
+      setVideoDurations(durations);
+      const total = durations.reduce((a, b) => a + b, 0);
+      setVideoDuration(total);
     }
   };
 
@@ -258,15 +352,16 @@ export default function Workspace() {
         return;
       }
 
-      const videoTime = videoRef.current.currentTime;
+      const localVideoTime = videoRef.current.currentTime;
+      const globalVideoTime = videoDurations.slice(0, activeVideoIndex).reduce((a, b) => a + b, 0) + localVideoTime;
 
       // OPTIMIZATION: Only update states and trigger re-renders if the video play clock actually advanced
-      if (videoTime !== lastTime) {
-        lastTime = videoTime;
-        setCurrentTime(videoTime);
+      if (globalVideoTime !== lastTime) {
+        lastTime = globalVideoTime;
+        setCurrentTime(globalVideoTime);
 
         // Align telemetry timestamp and apply time scaling (playback speed scaling)
-        const telemetryTime = (videoTime - syncOffset) * speedScale;
+        const telemetryTime = (globalVideoTime - syncOffset) * speedScale;
         const rows = localTelemetry.rows;
 
         // Binary search for surrounding logs
@@ -295,6 +390,7 @@ export default function Workspace() {
             lonAcc: Number(match.lonAcc) || 0,
             lat: Number(match.lat) || 0,
             lon: Number(match.lon) || 0,
+            lap: Number(match.lap) || 1,
           });
         } else {
           // `low` is the first index where rows[low].time >= telemetryTime after binary search
@@ -339,6 +435,7 @@ export default function Workspace() {
               lon: isNaN(rowA.lon + fraction * (rowB.lon - rowA.lon))
                 ? 0
                 : rowA.lon + fraction * (rowB.lon - rowA.lon),
+              lap: Number(rowA.lap) || 1,
             });
           }
         }
@@ -349,7 +446,14 @@ export default function Workspace() {
 
     animationFrameId = requestAnimationFrame(updateInterpolatedTelemetry);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [localTelemetry, syncOffset, speedScale]);
+  }, [localTelemetry, syncOffset, speedScale, activeVideoIndex, videoDurations]);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.volume = volume;
+      videoRef.current.muted = isMuted;
+    }
+  }, [volume, isMuted, activeVideoIndex]);
 
   // Video play controllers
   const togglePlay = () => {
@@ -469,7 +573,7 @@ export default function Workspace() {
 
   // GPU ACCELERATED VIDEO OVERLAY EXPORTER
   const handleExportVideo = async () => {
-    if (!videoRef.current || !localTelemetry || !videoFile) {
+    if (!videoRef.current || !localTelemetry || videoFiles.length === 0) {
       alert("Please load both GoPro POV video and CSV Telemetry data first!");
       return;
     }
@@ -493,32 +597,36 @@ export default function Workspace() {
     }
 
     const actualStart = exportStart;
-    const actualEnd = exportEnd > 0 ? exportEnd : originalVideo.duration;
+    const actualEnd = exportEnd > 0 ? exportEnd : videoDuration;
 
     // Aligned HTML5 Video player for frame scanning
-    const exportVideo = document.createElement("video");
-    exportVideo.src = videoUrl!;
-    exportVideo.muted = false; // MUST be unmuted to capture its audio!
-    exportVideo.volume = 1.0;
-    exportVideo.playsInline = true;
-    exportVideo.width = canvas.width;
-    exportVideo.height = canvas.height;
+    const exportVideos = await Promise.all(
+      videoUrls.map(async (url) => {
+        const v = document.createElement("video");
+        v.src = url;
+        v.muted = false; // MUST be unmuted to capture its audio!
+        v.volume = 1.0;
+        v.playsInline = true;
+        v.width = canvas.width;
+        v.height = canvas.height;
+        v.style.position = "absolute";
+        v.style.top = "0";
+        v.style.left = "0";
+        v.style.width = `${canvas.width}px`;
+        v.style.height = `${canvas.height}px`;
+        v.style.zIndex = "-9999";
+        v.style.opacity = "0.01";
+        v.style.pointerEvents = "none";
+        document.body.appendChild(v);
+        await new Promise<void>((resolve) => {
+          v.onloadeddata = () => resolve();
+        });
+        return v;
+      })
+    );
 
-    // Append to body (placed absolutely but invisible so browser doesn't throttle/suspend decoding!)
-    exportVideo.style.position = "absolute";
-    exportVideo.style.top = "0";
-    exportVideo.style.left = "0";
-    exportVideo.style.width = `${canvas.width}px`;
-    exportVideo.style.height = `${canvas.height}px`;
-    exportVideo.style.zIndex = "-9999";
-    exportVideo.style.opacity = "0.01";
-    exportVideo.style.pointerEvents = "none";
-    document.body.appendChild(exportVideo);
-
-    // Load video fully
-    await new Promise<void>((resolve) => {
-      exportVideo.onloadeddata = () => resolve();
-    });
+    let currentExportVideoIndex = 0;
+    let exportVideo = exportVideos[currentExportVideoIndex];
 
     // Capture the stream at 60 FPS for buttery smooth playback
     const canvasStream = canvas.captureStream(60);
@@ -536,11 +644,13 @@ export default function Workspace() {
         await audioCtx.resume();
       }
 
-      const source = audioCtx.createMediaElementSource(exportVideo);
       const dest = audioCtx.createMediaStreamDestination();
       
-      // Pipe video audio source to our recording stream destination
-      source.connect(dest);
+      // Pipe all video audio sources to our recording stream destination
+      exportVideos.forEach((v) => {
+        const source = audioCtx.createMediaElementSource(v);
+        source.connect(dest);
+      });
       
       // NOTE: We do NOT connect source to audioCtx.destination!
       // This prevents the audio from double-playing through the user's speakers,
@@ -583,9 +693,11 @@ export default function Workspace() {
 
     mediaRecorder.onstop = () => {
       isRecording = false;
-      if (exportVideo.parentNode) {
-        document.body.removeChild(exportVideo);
-      }
+      exportVideos.forEach(v => {
+        if (v.parentNode) {
+          document.body.removeChild(v);
+        }
+      });
       const actualMime = options.mimeType || "video/webm";
       const fileExt = actualMime.includes("mp4") ? "mp4" : "webm";
       const blob = new Blob(chunks, { type: actualMime });
@@ -600,8 +712,20 @@ export default function Workspace() {
       setIsExporting(false);
     };
 
-    // Seek to start position first before starting the recorder to avoid initial junk frame
-    exportVideo.currentTime = actualStart;
+    // Find starting video and relative time
+    let relativeStart = actualStart;
+    let cumulative = 0;
+    for (let i = 0; i < videoDurations.length; i++) {
+      if (actualStart < cumulative + videoDurations[i] || i === videoDurations.length - 1) {
+        currentExportVideoIndex = i;
+        relativeStart = actualStart - cumulative;
+        break;
+      }
+      cumulative += videoDurations[i];
+    }
+    
+    exportVideo = exportVideos[currentExportVideoIndex];
+    exportVideo.currentTime = relativeStart;
 
     const onSeeked = () => {
       exportVideo.removeEventListener("seeked", onSeeked);
@@ -658,13 +782,25 @@ export default function Workspace() {
     const renderLoop = () => {
       if (!isRecording) return;
 
-      const vTime = exportVideo.currentTime;
-      if (vTime >= actualEnd || exportVideo.paused || exportVideo.ended) {
-        if (mediaRecorder.state !== "inactive") {
-          mediaRecorder.stop();
+      const vTimeLocal = exportVideo.currentTime;
+      const vTime = videoDurations.slice(0, currentExportVideoIndex).reduce((a, b) => a + b, 0) + vTimeLocal;
+
+      if (vTime >= actualEnd || exportVideo.ended) {
+        if (exportVideo.ended && currentExportVideoIndex < exportVideos.length - 1 && vTime < actualEnd) {
+          // Move to next video
+          currentExportVideoIndex++;
+          exportVideo = exportVideos[currentExportVideoIndex];
+          exportVideo.currentTime = 0;
+          exportVideo.play();
+          requestAnimationFrame(renderLoop);
+          return;
+        } else {
+          if (mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+          }
+          isRecording = false;
+          return;
         }
-        isRecording = false;
-        return;
       }
 
       // 1. Draw video frame to canvas
@@ -683,6 +819,7 @@ export default function Workspace() {
         lonAcc: 0,
         lat: 0,
         lon: 0,
+        lap: 1,
       };
 
       // Simple interpolation loop
@@ -699,6 +836,7 @@ export default function Workspace() {
             lonAcc: m.lonAcc,
             lat: m.lat,
             lon: m.lon,
+            lap: m.lap || 1,
           };
           break;
         } else if (rows[mid].time < tTime) low = mid + 1;
@@ -722,6 +860,7 @@ export default function Workspace() {
             lonAcc: rA.lonAcc + frac * (rB.lonAcc - rA.lonAcc),
             lat: rA.lat + frac * (rB.lat - rA.lat),
             lon: rA.lon + frac * (rB.lon - rA.lon),
+            lap: rA.lap || 1,
           };
         }
       }
@@ -733,7 +872,24 @@ export default function Workspace() {
       }
 
       // 3. Render Telemetry overlays on top of the canvas frame
-      drawCanvasHUD(ctx, canvas.width, canvas.height, matchedTelemetry, gHistory, { cachedPath2D, trackScale, trackMinLon, trackMaxLat, trackHasGPS, tSvgW, tSvgH, tPadding, trackLonSpan, trackLatSpan });
+      drawCanvasHUD(ctx, canvas.width, canvas.height, matchedTelemetry, gHistory, {
+        cachedPath2D,
+        trackScale,
+        trackMinLon,
+        trackMaxLat,
+        trackHasGPS,
+        tSvgW,
+        tSvgH,
+        tPadding,
+        trackLonSpan,
+        trackLatSpan,
+        telemetryTime: tTime,
+        lapTimesStarts: lapTimes.starts,
+        lapTimesLaps: lapTimes.laps,
+        formatLapTime,
+        bestLapTimeStr: formatLapTime(bestLapInfo.time),
+        bestLapNum: bestLapInfo.lap,
+      });
 
       requestAnimationFrame(renderLoop);
     };
@@ -755,6 +911,7 @@ export default function Workspace() {
       lonAcc: number;
       lat: number;
       lon: number;
+      lap: number;
     },
     gHistory: {x: number, y: number}[],
     trackMapProps: any,
@@ -990,6 +1147,68 @@ export default function Workspace() {
       ctx.restore();
     }
 
+    // LAP TIMER WIDGET DRAW
+    if (layoutConfig.lapTimer?.visible) {
+      const wX = (layoutConfig.lapTimer.x / 100) * width;
+      const wY = (layoutConfig.lapTimer.y / 100) * height;
+      const wW = (layoutConfig.lapTimer.w / 100) * width;
+      const wH = (layoutConfig.lapTimer.h / 100) * height;
+
+      ctx.save();
+      ctx.fillStyle = "rgba(9, 9, 11, 0.7)";
+      ctx.strokeStyle = "rgba(39, 39, 42, 0.8)";
+      ctx.lineWidth = 1.5;
+      drawRoundedRect(ctx, wX, wY, wW, wH, 12);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(wX + 3, wY + 3);
+      ctx.lineTo(wX + 3, wY + wH - 3);
+      ctx.strokeStyle = "#22d3ee";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      const elapsed = Math.max(0, (trackMapProps.telemetryTime || 0) - (trackMapProps.lapTimesStarts?.[tel.lap] || 0));
+      const curTimeStr = trackMapProps.formatLapTime ? trackMapProps.formatLapTime(elapsed) : "0:00.00";
+      const bestTimeStr = trackMapProps.bestLapTimeStr || "0:00.00";
+
+      ctx.fillStyle = "#22d3ee";
+      ctx.font = `black ${Math.max(10, wH * 0.12)}px sans-serif`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(`LAP ${tel.lap}`, wX + 12, wY + wH * 0.1);
+
+      if (bestTimeStr !== "0:00.00") {
+        ctx.fillStyle = "#10b981";
+        ctx.font = `bold ${Math.max(8, wH * 0.1)}px monospace`;
+        ctx.textAlign = "right";
+        const bestLabel = trackMapProps.bestLapNum > 0 ? `BEST (L${trackMapProps.bestLapNum}):` : "BEST:";
+        ctx.fillText(`${bestLabel} ${bestTimeStr}`, wX + wW - 12, wY + wH * 0.1);
+      }
+
+      const prevDuration = trackMapProps.lapTimesLaps?.[tel.lap - 1] || 0;
+      if (prevDuration > 0 && trackMapProps.formatLapTime) {
+        const lastTimeStr = trackMapProps.formatLapTime(prevDuration);
+        ctx.fillStyle = "#d4d4d8";
+        ctx.font = `bold ${Math.max(8, wH * 0.1)}px monospace`;
+        ctx.textAlign = "right";
+        ctx.fillText(`LAST: ${lastTimeStr}`, wX + wW - Math.max(80, wW * 0.35), wY + wH * 0.1);
+      }
+
+      ctx.fillStyle = "rgba(244, 244, 245, 0.6)";
+      ctx.font = `bold ${Math.max(8, wH * 0.08)}px sans-serif`;
+      ctx.textAlign = "left";
+      ctx.fillText("CURRENT TIME", wX + 12, wY + wH * 0.35);
+
+      ctx.fillStyle = "#f4f4f5";
+      ctx.font = `black ${Math.max(14, wH * 0.28)}px monospace`;
+      ctx.fillText(curTimeStr, wX + 12, wY + wH * 0.52);
+
+      ctx.restore();
+    }
+
     ctx.restore();
   };
 
@@ -1022,10 +1241,19 @@ export default function Workspace() {
     ];
   }, [localTelemetry, modalTelemetryIdx]);
 
+  const currentTelemetryTime = useMemo(() => {
+    return (currentTime - syncOffset) * speedScale;
+  }, [currentTime, syncOffset, speedScale]);
+
+  const currentLapElapsed = useMemo(() => {
+    const start = lapTimes.starts[currentTelemetry.lap] || 0;
+    return Math.max(0, currentTelemetryTime - start);
+  }, [lapTimes, currentTelemetry.lap, currentTelemetryTime]);
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
       {/* EXPORT TRIM PREVIEW MODAL */}
-      {isExportModalOpen && videoUrl && (
+      {isExportModalOpen && videoUrls.length > 0 && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
           <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
             {/* Header */}
@@ -1055,7 +1283,7 @@ export default function Workspace() {
               <div className="relative aspect-video rounded-2xl overflow-hidden border border-zinc-800 bg-black">
                 <video
                   ref={exportPreviewVideoRef}
-                  src={videoUrl}
+                  src={videoUrls[0]}
                   className="w-full h-full object-cover"
                   onTimeUpdate={() => {
                     if (exportPreviewVideoRef.current) {
@@ -1244,10 +1472,10 @@ export default function Workspace() {
 
                 {/* Micro video player */}
                 <div className="aspect-video bg-black rounded-2xl overflow-hidden border border-zinc-800 flex items-center justify-center relative">
-                  {videoUrl ? (
+                  {videoUrls.length > 0 ? (
                     <video
                       ref={modalVideoRef}
-                      src={videoUrl}
+                      src={videoUrls[0]}
                       className="w-full h-full object-cover"
                       controls={false}
                       onTimeUpdate={() => {
@@ -1748,14 +1976,21 @@ export default function Workspace() {
           onMouseUp={handleOverlayMouseUp}
           onMouseLeave={handleOverlayMouseUp}
         >
-          {videoUrl ? (
+          {videoUrls.length > 0 ? (
             <video
               ref={videoRef}
-              src={videoUrl}
+              src={videoUrls[activeVideoIndex]}
               className="w-full h-full object-cover rounded-3xl"
-              onLoadedMetadata={() =>
-                setVideoDuration(videoRef.current?.duration || 0)
-              }
+              onEnded={() => {
+                if (activeVideoIndex < videoUrls.length - 1) {
+                  setActiveVideoIndex(activeVideoIndex + 1);
+                  setTimeout(() => {
+                    if (videoRef.current && isPlaying) videoRef.current.play();
+                  }, 0);
+                } else {
+                  setIsPlaying(false);
+                }
+              }}
               onClick={togglePlay}
             />
           ) : (
@@ -1777,6 +2012,7 @@ export default function Workspace() {
                 <span>Select Local Video</span>
                 <input
                   type="file"
+                  multiple
                   accept="video/*"
                   onChange={handleVideoChange}
                   className="hidden"
@@ -1874,6 +2110,32 @@ export default function Workspace() {
                   />
                 </div>
               )}
+
+              {/* LAP TIMER WIDGET */}
+              {layoutConfig.lapTimer?.visible && (
+                <div
+                  className={`absolute transition-all duration-75 select-none ${
+                    isEditMode
+                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                      : ""
+                  }`}
+                  style={{
+                    left: `${layoutConfig.lapTimer.x}%`,
+                    top: `${layoutConfig.lapTimer.y}%`,
+                    width: `${layoutConfig.lapTimer.w}%`,
+                    height: `${layoutConfig.lapTimer.h}%`,
+                  }}
+                  onMouseDown={(e) => handleWidgetMouseDown(e, "lapTimer")}
+                >
+                  <LapTimer
+                    currentLap={currentTelemetry.lap}
+                    currentLapTime={formatLapTime(currentLapElapsed)}
+                    bestLapTime={formatLapTime(bestLapInfo.time)}
+                    bestLapNum={bestLapInfo.lap}
+                    previousLapTime={formatLapTime(lapTimes.laps[currentTelemetry.lap - 1] || 0)}
+                  />
+                </div>
+              )}
             </div>
           )}
 
@@ -1890,15 +2152,50 @@ export default function Workspace() {
           <div className="flex items-center space-x-3">
             <button
               onClick={togglePlay}
-              disabled={!videoUrl}
+              disabled={videoUrls.length === 0}
               className={`p-2.5 rounded-xl transition ${
-                videoUrl
+                videoUrls.length > 0
                   ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-100 cursor-pointer"
                   : "bg-zinc-900 text-zinc-700 cursor-not-allowed"
               }`}
             >
               {isPlaying ? <Pause size={18} /> : <Play size={18} />}
             </button>
+
+            <div className="flex items-center space-x-2 bg-zinc-950/60 border border-zinc-850/80 px-2.5 py-1.5 rounded-xl transition-all duration-200">
+              <button
+                onClick={() => setIsMuted(!isMuted)}
+                disabled={videoUrls.length === 0}
+                className={`transition-colors cursor-pointer ${
+                  videoUrls.length > 0
+                    ? "text-zinc-400 hover:text-zinc-100"
+                    : "text-zinc-700 cursor-not-allowed"
+                }`}
+              >
+                {isMuted || volume === 0 ? (
+                  <VolumeX size={16} className="text-zinc-555" />
+                ) : (
+                  <Volume2 size={16} className="text-cyan-400" />
+                )}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={isMuted ? 0 : volume}
+                disabled={videoUrls.length === 0}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setVolume(val);
+                  if (val > 0) {
+                    setIsMuted(false);
+                  }
+                }}
+                className="w-16 h-1 accent-cyan-400 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed"
+                title="Volume"
+              />
+            </div>
 
             {/* Main Video Progress slider with range mark */}
             <div className="relative flex-grow h-6 flex items-center">
@@ -1919,17 +2216,37 @@ export default function Workspace() {
                 max={videoDuration || 100}
                 step={0.05}
                 value={currentTime}
-                disabled={!videoUrl}
+                disabled={videoUrls.length === 0}
                 onChange={(e) => {
                   const val = parseFloat(e.target.value);
                   setCurrentTime(val);
-                  if (videoRef.current) videoRef.current.currentTime = val;
+
+                  let t = 0;
+                  let idx = 0;
+                  for (let i = 0; i < videoDurations.length; i++) {
+                    if (val <= t + videoDurations[i] || i === videoDurations.length - 1) {
+                      idx = i;
+                      break;
+                    }
+                    t += videoDurations[i];
+                  }
+                  
+                  if (idx !== activeVideoIndex) {
+                    setActiveVideoIndex(idx);
+                    if (videoRef.current) {
+                      videoRef.current.src = videoUrls[idx];
+                      videoRef.current.currentTime = val - t;
+                      if (isPlaying) videoRef.current.play();
+                    }
+                  } else {
+                    if (videoRef.current) videoRef.current.currentTime = val - t;
+                  }
                 }}
                 className="w-full accent-cyan-400 h-1 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed z-10"
               />
             </div>
 
-            <div className="text-xs font-mono text-zinc-400 select-none">
+            <div className="text-xs font-mono text-zinc-400 select-none tabular-nums w-[110px] text-right">
               {Math.floor(currentTime / 60)}:
               {String(Math.floor(currentTime % 60)).padStart(2, "0")}.
               {String(Math.floor((currentTime % 1) * 10)).padStart(1, "0")} /{" "}
@@ -1947,9 +2264,9 @@ export default function Workspace() {
                   }
                 }
               }}
-              disabled={!videoUrl}
+              disabled={videoUrls.length === 0}
               className={`p-2.5 rounded-xl transition ml-2 ${
-                videoUrl
+                videoUrls.length > 0
                   ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-100 cursor-pointer"
                   : "bg-zinc-900 text-zinc-700 cursor-not-allowed"
               }`}
@@ -2041,13 +2358,14 @@ export default function Workspace() {
               <input
                 type="file"
                 accept="video/*"
+                multiple
                 onChange={handleVideoChange}
                 className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
               />
               <div className="flex flex-col items-center justify-center space-y-1">
                 <Video size={20} className="text-cyan-400" />
                 <span className="text-[10px] text-zinc-400 font-semibold truncate max-w-55">
-                  {videoFile ? videoFile.name : "Select POV Video"}
+                  {videoFiles.length > 0 ? `${videoFiles.length} video(s) selected` : "Select POV Video"}
                 </span>
                 <span className="text-[8px] text-zinc-555">
                   Loads locally for maximum GPU rendering speed
@@ -2099,7 +2417,7 @@ export default function Workspace() {
         </div>
 
         {/* GPU Exporter Control Center */}
-        {localTelemetry && videoFile && (
+        {localTelemetry && videoFiles.length > 0 && (
           <div className="bg-zinc-900/80 backdrop-blur-md border border-rose-500/30 p-5 rounded-3xl flex flex-col space-y-4 shadow-[0_0_20px_rgba(244,63,94,0.1)]">
             <h3 className="text-xs font-black uppercase tracking-widest text-rose-500 flex items-center space-x-2">
               <Video size={14} className="text-rose-500 animate-pulse" />
