@@ -25,7 +25,7 @@ export default function Speedometer({
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
-      <div className="relative w-36 h-36 flex items-center justify-center">
+      <div className="relative w-full h-full flex items-center justify-center">
         <svg className="w-full h-full transform -rotate-90" viewBox="0 0 200 200">
           <circle
             cx={center}
@@ -50,20 +50,34 @@ export default function Speedometer({
             strokeDasharray={`${arcLength} ${circumference}`}
             strokeDashoffset={strokeDashoffset}
             strokeLinecap="round"
-            className="transform rotate-[135deg] drop-shadow-[0_0_8px_rgba(34,211,238,0.5)]"
+            className="transform rotate-[135deg] drop-shadow-[0_0_8px_rgba(34,211,238,0.5)] transition-all duration-75 ease-out"
             style={{ transformOrigin: "50% 50%" }}
           />
 
-        </svg>
-
-        <div className="absolute flex flex-col items-center justify-center text-center">
-          <span className="text-4xl font-extrabold tracking-tight font-mono text-zinc-100 leading-none">
+          <text
+            x={center}
+            y={center}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fill="#ffffff"
+            className="text-[42px] font-extrabold tracking-tight font-mono transform rotate-90"
+            style={{ transformOrigin: "50% 50%" }}
+          >
             {Math.round(clampedSpeed)}
-          </span>
-          <span className="text-[10px] font-sans font-bold tracking-wider text-zinc-500 uppercase mt-1">
+          </text>
+          
+          <text
+            x={center}
+            y={center + 25}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fill="rgba(255,255,255,0.5)"
+            className="text-[12px] font-sans font-bold tracking-wider uppercase transform rotate-90"
+            style={{ transformOrigin: "50% 50%" }}
+          >
             {unit}
-          </span>
-        </div>
+          </text>
+        </svg>
       </div>
     </div>
   );

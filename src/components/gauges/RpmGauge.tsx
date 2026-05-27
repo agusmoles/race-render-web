@@ -32,7 +32,7 @@ export default function RpmGauge({
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
-      <div className="relative w-28 h-28 flex items-center justify-center">
+      <div className="relative w-full h-full flex items-center justify-center">
         <svg className="w-full h-full transform -rotate-90" viewBox="0 0 160 160">
           <circle
             cx={center}
@@ -57,23 +57,37 @@ export default function RpmGauge({
             strokeDasharray={`${arcLength} ${circumference}`}
             strokeDashoffset={strokeDashoffset}
             strokeLinecap="round"
-            className="transform rotate-135"
+            className="transform rotate-135 transition-all duration-75 ease-out"
             style={{
               transformOrigin: "50% 50%",
               filter: `drop-shadow(0 0 8px ${arcColor}80)`,
             }}
           />
 
-        </svg>
-
-        <div className="absolute flex flex-col items-center justify-center text-center">
-          <span className="text-lg font-extrabold tracking-tight font-mono text-zinc-100 leading-none">
+          <text
+            x={center}
+            y={center}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fill="#ffffff"
+            className="text-[28px] font-extrabold tracking-tight font-mono transform rotate-90"
+            style={{ transformOrigin: "50% 50%" }}
+          >
             {Math.round(clampedRpm)}
-          </span>
-          <span className="text-[7px] font-sans font-bold tracking-wider text-zinc-500 uppercase mt-0.5">
+          </text>
+          
+          <text
+            x={center}
+            y={center + 20}
+            textAnchor="middle"
+            dominantBaseline="central"
+            fill="rgba(255,255,255,0.5)"
+            className="text-[10px] font-sans font-bold tracking-wider uppercase transform rotate-90"
+            style={{ transformOrigin: "50% 50%" }}
+          >
             rpm
-          </span>
-        </div>
+          </text>
+        </svg>
       </div>
     </div>
   );

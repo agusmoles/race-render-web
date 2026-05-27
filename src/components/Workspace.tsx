@@ -15,6 +15,7 @@ import {
   Zap,
   MapPin,
   Flag,
+  Maximize,
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/lib/csv-helper";
 import Speedometer from "./gauges/Speedometer";
@@ -72,9 +73,28 @@ export default function Workspace() {
 
   // Video Ref & Playback state
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Export trim range
+  const [prevVideoDuration, setPrevVideoDuration] = useState(0);
+  const [exportStart, setExportStart] = useState<number>(0);
+  const [exportEnd, setExportEnd] = useState<number>(0);
+
+  if (videoDuration !== prevVideoDuration) {
+    setPrevVideoDuration(videoDuration);
+    if (exportEnd === 0) {
+      setExportEnd(videoDuration);
+    }
+  }
+
+  const formatTimeMinutes = (secs: number) => {
+    const mins = Math.floor(secs / 60);
+    const remainingSecs = Math.floor(secs % 60);
+    return `${mins}:${remainingSecs.toString().padStart(2, "0")}`;
+  };
 
   // High performance telemetry interpolation state
   const [currentTelemetry, setCurrentTelemetry] = useState({
@@ -88,6 +108,9 @@ export default function Workspace() {
 
   // Telemetry Sync Wizard Modal State
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportPreviewTime, setExportPreviewTime] = useState(0);
+  const exportPreviewVideoRef = useRef<HTMLVideoElement>(null);
   const [modalVideoTime, setModalVideoTime] = useState(0);
   const [modalTelemetryIdx, setModalTelemetryIdx] = useState(0);
   const modalVideoRef = useRef<HTMLVideoElement>(null);
@@ -192,6 +215,8 @@ export default function Workspace() {
       setVideoUrl(url);
       setIsPlaying(false);
       setCurrentTime(0);
+      setExportStart(0);
+      setExportEnd(0);
     }
   };
 
@@ -467,21 +492,36 @@ export default function Workspace() {
       return;
     }
 
+    const actualStart = exportStart;
+    const actualEnd = exportEnd > 0 ? exportEnd : originalVideo.duration;
+
     // Aligned HTML5 Video player for frame scanning
     const exportVideo = document.createElement("video");
     exportVideo.src = videoUrl!;
-    exportVideo.muted = true;
+    exportVideo.muted = false; // MUST be unmuted to capture its audio!
+    exportVideo.volume = 1.0;
     exportVideo.playsInline = true;
     exportVideo.width = canvas.width;
     exportVideo.height = canvas.height;
 
+    // Append to body (placed absolutely but invisible so browser doesn't throttle/suspend decoding!)
+    exportVideo.style.position = "absolute";
+    exportVideo.style.top = "0";
+    exportVideo.style.left = "0";
+    exportVideo.style.width = `${canvas.width}px`;
+    exportVideo.style.height = `${canvas.height}px`;
+    exportVideo.style.zIndex = "-9999";
+    exportVideo.style.opacity = "0.01";
+    exportVideo.style.pointerEvents = "none";
+    document.body.appendChild(exportVideo);
+
     // Load video fully
-    await new Promise((resolve) => {
-      exportVideo.onloadeddata = resolve;
+    await new Promise<void>((resolve) => {
+      exportVideo.onloadeddata = () => resolve();
     });
 
-    // Capture the stream at 30 FPS
-    const canvasStream = canvas.captureStream(30);
+    // Capture the stream at 60 FPS for buttery smooth playback
+    const canvasStream = canvas.captureStream(60);
 
     // Set up Audio Mixing from original video
     let audioStreamTrack: MediaStreamTrack | null = null;
@@ -490,10 +530,22 @@ export default function Workspace() {
         window.AudioContext ||
         (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
       )();
+
+      // Explicitly resume the AudioContext (browsers block background audio until resumed)
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+
       const source = audioCtx.createMediaElementSource(exportVideo);
       const dest = audioCtx.createMediaStreamDestination();
+      
+      // Pipe video audio source to our recording stream destination
       source.connect(dest);
-      source.connect(audioCtx.destination); // Let user hear sound while recording
+      
+      // NOTE: We do NOT connect source to audioCtx.destination!
+      // This prevents the audio from double-playing through the user's speakers,
+      // but still captures it perfectly into the output recording stream!
+      
       audioStreamTrack = dest.stream.getAudioTracks()[0];
     } catch (e) {
       console.warn("Could not capture video audio stream track:", e);
@@ -505,28 +557,42 @@ export default function Workspace() {
       exportStream.addTrack(audioStreamTrack);
     }
 
-    // Initialize MediaRecorder
-    let options = { mimeType: "video/webm;codecs=vp9,opus" };
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-      options = { mimeType: "video/webm;codecs=vp8,opus" };
-    }
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-      options = { mimeType: "video/webm" };
+    // Initialize MediaRecorder with parameters optimized for hardware acceleration and stability
+    let options: MediaRecorderOptions = {};
+    const preferredTypes = [
+      "video/webm;codecs=h264,opus",
+      "video/mp4;codecs=avc1",
+      "video/webm;codecs=vp8,opus",
+      "video/webm;codecs=vp9,opus",
+      "video/webm"
+    ];
+    for (const mimeType of preferredTypes) {
+      if (MediaRecorder.isTypeSupported(mimeType)) {
+        options = { mimeType, videoBitsPerSecond: 15000000 }; // 15 Mbps for high quality 60fps
+        break;
+      }
     }
 
     const mediaRecorder = new MediaRecorder(exportStream, options);
     const chunks: Blob[] = [];
+    let isRecording = false;
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) chunks.push(e.data);
     };
 
     mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: "video/webm" });
+      isRecording = false;
+      if (exportVideo.parentNode) {
+        document.body.removeChild(exportVideo);
+      }
+      const actualMime = options.mimeType || "video/webm";
+      const fileExt = actualMime.includes("mp4") ? "mp4" : "webm";
+      const blob = new Blob(chunks, { type: actualMime });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `overlay_render.webm`;
+      a.download = `overlay_render.${fileExt}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -534,17 +600,70 @@ export default function Workspace() {
       setIsExporting(false);
     };
 
-    // Begin recording
-    mediaRecorder.start();
-    exportVideo.currentTime = 0;
-    exportVideo.play();
+    // Seek to start position first before starting the recorder to avoid initial junk frame
+    exportVideo.currentTime = actualStart;
 
-    // High performance frame rendering loop
-    const duration = exportVideo.duration;
+    const onSeeked = () => {
+      exportVideo.removeEventListener("seeked", onSeeked);
+      isRecording = true;
+      mediaRecorder.start(100); // 100ms timeslices for stable memory usage
+      exportVideo.play();
+    };
+    exportVideo.addEventListener("seeked", onSeeked);
+
+    let gHistory: {x: number, y: number}[] = [];
+    let trackPath = "";
+    let trackScale = 1;
+    let trackMinLon = 0;
+    let trackMaxLat = 0;
+    let trackHasGPS = false;
+    let tPadding = 20;
+    let tSvgW = 200, tSvgH = 200;
+    let trackLonSpan = 0;
+    let trackLatSpan = 0;
+
+    if (localTelemetry?.rows && localTelemetry.rows.length > 5) {
+      const validPoints = localTelemetry.rows.filter((p: any) => p.lat !== 0 && p.lon !== 0);
+      if (validPoints.length > 5) {
+        let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+        for (const p of validPoints) {
+          if (p.lat < minLat) minLat = p.lat;
+          if (p.lat > maxLat) maxLat = p.lat;
+          if (p.lon < minLon) minLon = p.lon;
+          if (p.lon > maxLon) maxLon = p.lon;
+        }
+        trackLatSpan = maxLat - minLat;
+        trackLonSpan = maxLon - minLon;
+        if (trackLatSpan > 0 && trackLonSpan > 0) {
+          trackHasGPS = true;
+          const scaleX = (tSvgW - tPadding * 2) / trackLonSpan;
+          const scaleY = (tSvgH - tPadding * 2) / trackLatSpan;
+          trackScale = Math.min(scaleX, scaleY);
+          trackMinLon = minLon;
+          trackMaxLat = maxLat;
+          
+          validPoints.forEach((p: any, idx: number) => {
+            const x = tPadding + (p.lon - minLon) * trackScale + (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
+            const y = tPadding + (maxLat - p.lat) * trackScale + (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
+            if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
+            else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+          });
+          trackPath += " Z";
+        }
+      }
+    }
+    
+    const cachedPath2D = trackHasGPS ? new Path2D(trackPath) : null;
 
     const renderLoop = () => {
-      if (exportVideo.paused || exportVideo.ended) {
-        mediaRecorder.stop();
+      if (!isRecording) return;
+
+      const vTime = exportVideo.currentTime;
+      if (vTime >= actualEnd || exportVideo.paused || exportVideo.ended) {
+        if (mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+        isRecording = false;
         return;
       }
 
@@ -552,8 +671,8 @@ export default function Workspace() {
       ctx.drawImage(exportVideo, 0, 0, canvas.width, canvas.height);
 
       // 2. Interpolate active telemetry metrics
-      const vTime = exportVideo.currentTime;
-      setExportProgress(Math.round((vTime / duration) * 100));
+      const totalExportDuration = actualEnd - actualStart;
+      setExportProgress(Math.max(0, Math.min(100, Math.round(((vTime - actualStart) / totalExportDuration) * 100))));
 
       const tTime = (vTime - syncOffset) * speedScale;
       const rows = localTelemetry.rows;
@@ -607,18 +726,20 @@ export default function Workspace() {
         }
       }
 
+      // Maintain G-Force trace history
+      if (gHistory.length === 0 || gHistory[gHistory.length - 1].x !== matchedTelemetry.latAcc || gHistory[gHistory.length - 1].y !== matchedTelemetry.lonAcc) {
+        gHistory.push({ x: matchedTelemetry.latAcc, y: matchedTelemetry.lonAcc });
+        if (gHistory.length > 6) gHistory.shift();
+      }
+
       // 3. Render Telemetry overlays on top of the canvas frame
-      drawCanvasHUD(ctx, canvas.width, canvas.height, matchedTelemetry);
+      drawCanvasHUD(ctx, canvas.width, canvas.height, matchedTelemetry, gHistory, { cachedPath2D, trackScale, trackMinLon, trackMaxLat, trackHasGPS, tSvgW, tSvgH, tPadding, trackLonSpan, trackLatSpan });
 
       requestAnimationFrame(renderLoop);
     };
 
     exportVideo.onplay = () => {
       requestAnimationFrame(renderLoop);
-    };
-
-    exportVideo.onended = () => {
-      mediaRecorder.stop();
     };
   };
 
@@ -635,6 +756,8 @@ export default function Workspace() {
       lat: number;
       lon: number;
     },
+    gHistory: {x: number, y: number}[],
+    trackMapProps: any,
   ) => {
     ctx.save();
 
@@ -646,32 +769,39 @@ export default function Workspace() {
       const wH = (layoutConfig.speedometer.h / 100) * height;
 
       const cx = wX + wW / 2;
-      const cy = wY + wH / 2 + 5;
+      const cy = wY + wH / 2;
       const r = Math.min(wW, wH) * 0.35;
 
       ctx.beginPath();
       ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
       ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-      ctx.lineWidth = 8;
+      ctx.lineWidth = r * 0.15;
+      ctx.lineCap = "round";
       ctx.stroke();
 
       const clampedPct = Math.min(1, Math.max(0, tel.speed / 260));
-      const endAngle = 135 + clampedPct * 270;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
-      ctx.strokeStyle = "#22d3ee";
-      ctx.lineWidth = 8;
-      ctx.stroke();
+      if (clampedPct > 0) {
+        const endAngle = 135 + clampedPct * 270;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
+        ctx.strokeStyle = "#22d3ee";
+        ctx.lineWidth = r * 0.15;
+        ctx.lineCap = "round";
+        ctx.shadowColor = "rgba(34,211,238,0.5)";
+        ctx.shadowBlur = r * 0.1;
+        ctx.stroke();
+        ctx.shadowBlur = 0; // reset
+      }
 
       ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 26px Orbitron, monospace";
+      ctx.font = `bold ${r * 0.55}px monospace`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(Math.round(tel.speed).toString(), cx, cy - 2);
+      ctx.fillText(Math.round(tel.speed).toString(), cx, cy);
 
-      ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
-      ctx.font = "bold 9px Inter, sans-serif";
-      ctx.fillText("KM/H", cx, cy + r - 10);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+      ctx.font = `bold ${r * 0.15}px sans-serif`;
+      ctx.fillText("KM/H", cx, cy + r * 0.35);
     }
 
     // RPM GAUGE DRAW
@@ -682,8 +812,8 @@ export default function Workspace() {
       const wH = (layoutConfig.rpmGauge.h / 100) * height;
 
       const cx = wX + wW / 2;
-      const cy = wY + wH / 2 + 3;
-      const r = Math.min(wW, wH) * 0.32;
+      const cy = wY + wH / 2;
+      const r = Math.min(wW, wH) * 0.30;
       const maxRpm = 15000;
       const clampedPct = Math.min(1, Math.max(0, tel.rpm / maxRpm));
 
@@ -695,25 +825,32 @@ export default function Workspace() {
       ctx.beginPath();
       ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
       ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-      ctx.lineWidth = 6;
+      ctx.lineWidth = r * 0.15;
+      ctx.lineCap = "round";
       ctx.stroke();
 
-      const endAngle = 135 + clampedPct * 270;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
-      ctx.strokeStyle = arcColor;
-      ctx.lineWidth = 6;
-      ctx.stroke();
+      if (clampedPct > 0) {
+        const endAngle = 135 + clampedPct * 270;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
+        ctx.strokeStyle = arcColor;
+        ctx.lineWidth = r * 0.15;
+        ctx.lineCap = "round";
+        ctx.shadowColor = arcColor;
+        ctx.shadowBlur = r * 0.1;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
 
       ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 18px Orbitron, monospace";
+      ctx.font = `bold ${r * 0.4}px monospace`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(Math.round(tel.rpm).toString(), cx, cy - 2);
+      ctx.fillText(Math.round(tel.rpm).toString(), cx, cy);
 
-      ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
-      ctx.font = "bold 7px Inter, sans-serif";
-      ctx.fillText("RPM", cx, cy + r - 8);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+      ctx.font = `bold ${r * 0.15}px sans-serif`;
+      ctx.fillText("RPM", cx, cy + r * 0.3);
     }
 
     // G-FORCE GAUGE DRAW
@@ -724,11 +861,25 @@ export default function Workspace() {
       const wH = (layoutConfig.gForceRadar.h / 100) * height;
 
       const cx = wX + wW / 2;
-      const cy = wY + wH / 2 + 5;
+      const cy = wY + wH / 2;
       const r = Math.min(wW, wH) * 0.35;
+      const maxG = 1.6;
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = `bold ${r * 0.15}px monospace`;
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.fillText(`LAT: `, cx - r * 0.4, cy - r - r * 0.2);
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.fillText(`${tel.latAcc.toFixed(2)}G`, cx - r * 0.1, cy - r - r * 0.2);
+      
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.fillText(`LON: `, cx + r * 0.4, cy - r - r * 0.2);
+      ctx.fillStyle = "rgba(255,255,255,0.9)";
+      ctx.fillText(`${tel.lonAcc.toFixed(2)}G`, cx + r * 0.7, cy - r - r * 0.2);
 
       ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
-      ctx.lineWidth = 1;
+      ctx.lineWidth = Math.max(1, r * 0.015);
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, 2 * Math.PI);
@@ -737,13 +888,13 @@ export default function Workspace() {
       ctx.setLineDash([]);
       ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
       ctx.beginPath();
-      ctx.arc(cx, cy, r * (1.0 / 1.6), 0, 2 * Math.PI);
+      ctx.arc(cx, cy, r * (1.0 / maxG), 0, 2 * Math.PI);
       ctx.stroke();
 
       ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
       ctx.setLineDash([2, 2]);
       ctx.beginPath();
-      ctx.arc(cx, cy, r * (0.5 / 1.6), 0, 2 * Math.PI);
+      ctx.arc(cx, cy, r * (0.5 / maxG), 0, 2 * Math.PI);
       ctx.stroke();
       ctx.setLineDash([]);
 
@@ -755,22 +906,88 @@ export default function Workspace() {
       ctx.lineTo(cx, cy + r);
       ctx.stroke();
 
-      const maxG = 1.6;
-      const gX = cx - (tel.latAcc / maxG) * r;
-      const gY = cy + (tel.lonAcc / maxG) * r;
+      const getGCoords = (gX: number, gY: number) => {
+        const x = cx - (gX / maxG) * r;
+        const y = cy + (gY / maxG) * r;
+        return {
+          x: Math.max(cx - r, Math.min(cx + r, x)),
+          y: Math.max(cy - r, Math.min(cy + r, y)),
+        };
+      };
 
+      gHistory.slice(0, -1).forEach((gPoint, index) => {
+        const coords = getGCoords(gPoint.x, gPoint.y);
+        const opacity = (index + 1) / gHistory.length;
+        const size = (r * 0.03) + opacity * (r * 0.05);
+        ctx.beginPath();
+        ctx.arc(coords.x, coords.y, size, 0, 2 * Math.PI);
+        ctx.fillStyle = `rgba(244, 63, 94, ${opacity * 0.4})`;
+        ctx.fill();
+      });
+
+      const currentCoords = getGCoords(tel.latAcc, tel.lonAcc);
       ctx.beginPath();
-      ctx.arc(gX, gY, 5, 0, 2 * Math.PI);
+      ctx.arc(currentCoords.x, currentCoords.y, r * 0.1, 0, 2 * Math.PI);
       ctx.fillStyle = "#f43f5e";
-      ctx.shadowColor = "#f43f5e";
-      ctx.shadowBlur = 8;
+      ctx.shadowColor = "rgba(244, 63, 94, 0.8)";
+      ctx.shadowBlur = r * 0.1;
       ctx.fill();
       ctx.shadowBlur = 0;
 
       ctx.beginPath();
-      ctx.arc(gX, gY, 2, 0, 2 * Math.PI);
+      ctx.arc(currentCoords.x, currentCoords.y, r * 0.03, 0, 2 * Math.PI);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
+    }
+
+    // TRACK MAP DRAW
+    if (layoutConfig.trackMap?.visible && trackMapProps.trackHasGPS) {
+      const wX = (layoutConfig.trackMap.x / 100) * width;
+      const wY = (layoutConfig.trackMap.y / 100) * height;
+      const wW = (layoutConfig.trackMap.w / 100) * width;
+      const wH = (layoutConfig.trackMap.h / 100) * height;
+
+      // Create a clipping region or just scale perfectly into the box
+      const scaleToFit = Math.min(wW / trackMapProps.tSvgW, wH / trackMapProps.tSvgH);
+      const cx = wX + (wW - trackMapProps.tSvgW * scaleToFit) / 2;
+      const cy = wY + (wH - trackMapProps.tSvgH * scaleToFit) / 2;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(scaleToFit, scaleToFit);
+
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      if (trackMapProps.cachedPath2D) {
+        ctx.strokeStyle = "rgba(255,255,255,0.25)";
+        ctx.lineWidth = 5;
+        ctx.stroke(trackMapProps.cachedPath2D);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
+        ctx.lineWidth = 2;
+        ctx.stroke(trackMapProps.cachedPath2D);
+      }
+
+      // Draw current pos
+      if (tel.lat !== 0 && tel.lon !== 0) {
+        const ptX = trackMapProps.tPadding + (tel.lon - trackMapProps.trackMinLon) * trackMapProps.trackScale + (trackMapProps.tSvgW - trackMapProps.tPadding * 2 - trackMapProps.trackLonSpan * trackMapProps.trackScale) / 2;
+        const ptY = trackMapProps.tPadding + (trackMapProps.trackMaxLat - tel.lat) * trackMapProps.trackScale + (trackMapProps.tSvgH - trackMapProps.tPadding * 2 - trackMapProps.trackLatSpan * trackMapProps.trackScale) / 2;
+
+        ctx.beginPath();
+        ctx.arc(ptX, ptY, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = "#22d3ee";
+        ctx.shadowColor = "#22d3ee";
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+
+        ctx.beginPath();
+        ctx.arc(ptX, ptY, 1.5, 0, 2 * Math.PI);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+      }
+      ctx.restore();
     }
 
     ctx.restore();
@@ -807,6 +1024,158 @@ export default function Workspace() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
+      {/* EXPORT TRIM PREVIEW MODAL */}
+      {isExportModalOpen && videoUrl && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="flex justify-between items-center px-6 py-4 border-b border-zinc-800">
+              <div className="flex flex-col">
+                <div className="flex items-center space-x-2">
+                  <Video className="text-cyan-400" size={18} />
+                  <h3 className="text-sm font-black uppercase tracking-wider text-zinc-100">
+                    Trim & Render Overlay Video
+                  </h3>
+                </div>
+                <p className="text-[9px] text-zinc-550 uppercase tracking-wider mt-0.5 ml-6 font-semibold">
+                  Preview video, select start/end crop marks, and export in ultra-high quality
+                </p>
+              </div>
+              <button
+                onClick={() => setIsExportModalOpen(false)}
+                className="p-1 text-zinc-500 hover:text-zinc-300 rounded-lg transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Content */}
+            <div className="p-6 flex flex-col space-y-4 overflow-y-auto">
+              {/* Preview player */}
+              <div className="relative aspect-video rounded-2xl overflow-hidden border border-zinc-800 bg-black">
+                <video
+                  ref={exportPreviewVideoRef}
+                  src={videoUrl}
+                  className="w-full h-full object-cover"
+                  onTimeUpdate={() => {
+                    if (exportPreviewVideoRef.current) {
+                      setExportPreviewTime(exportPreviewVideoRef.current.currentTime);
+                    }
+                  }}
+                  controls
+                />
+              </div>
+
+              {/* Position and Format */}
+              <div className="flex justify-between items-center text-xs font-mono text-zinc-400 bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-850">
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">Position:</span>
+                  <span className="text-cyan-400 font-bold">{formatTimeMinutes(exportPreviewTime)}</span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">Total Duration:</span>
+                  <span className="text-zinc-300 font-bold">{formatTimeMinutes(videoDuration)}</span>
+                </div>
+              </div>
+
+              {/* Crop control range highlight timeline bar */}
+              <div className="flex flex-col space-y-4 bg-zinc-950/40 border border-zinc-800/80 p-4 rounded-2xl">
+                {/* Trim Sliders */}
+                <div className="flex flex-col space-y-3">
+                  <div className="flex flex-col space-y-1">
+                    <div className="flex justify-between items-center text-[10px] text-zinc-400 font-black uppercase">
+                      <span>Export Start (Trim In):</span>
+                      <span className="font-mono text-cyan-400 font-bold">{formatTimeMinutes(exportStart)}</span>
+                    </div>
+                    <div className="relative w-full h-6 flex items-center">
+                      <div className="absolute w-full h-1 bg-zinc-800 rounded-lg" />
+                      <div
+                        className="absolute h-1 bg-cyan-400/35 border-l border-r border-cyan-400 rounded"
+                        style={{
+                          left: `${(exportStart / videoDuration) * 100}%`,
+                          width: `${((exportEnd - exportStart) / videoDuration) * 100}%`,
+                        }}
+                      />
+                      <input
+                        type="range"
+                        min={0}
+                        max={videoDuration || 100}
+                        step={0.5}
+                        value={exportStart}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const newStart = Math.min(val, exportEnd);
+                          setExportStart(newStart);
+                          if (exportPreviewVideoRef.current) {
+                            exportPreviewVideoRef.current.currentTime = newStart;
+                          }
+                        }}
+                        className="w-full accent-cyan-400 h-1 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col space-y-1">
+                    <div className="flex justify-between items-center text-[10px] text-zinc-400 font-black uppercase">
+                      <span>Export End (Trim Out):</span>
+                      <span className="font-mono text-cyan-400 font-bold">
+                        {formatTimeMinutes(exportEnd === 0 && videoDuration > 0 ? videoDuration : exportEnd)}
+                      </span>
+                    </div>
+                    <div className="relative w-full h-6 flex items-center">
+                      <div className="absolute w-full h-1 bg-zinc-800 rounded-lg" />
+                      <div
+                        className="absolute h-1 bg-cyan-400/35 border-l border-r border-cyan-400 rounded"
+                        style={{
+                          left: `${(exportStart / videoDuration) * 100}%`,
+                          width: `${((exportEnd - exportStart) / videoDuration) * 100}%`,
+                        }}
+                      />
+                      <input
+                        type="range"
+                        min={0}
+                        max={videoDuration || 100}
+                        step={0.5}
+                        value={exportEnd === 0 && videoDuration > 0 ? videoDuration : exportEnd}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const newEnd = Math.max(val, exportStart);
+                          setExportEnd(newEnd);
+                          if (exportPreviewVideoRef.current) {
+                            exportPreviewVideoRef.current.currentTime = newEnd;
+                          }
+                        }}
+                        className="w-full accent-cyan-400 h-1 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex justify-end space-x-3 rounded-b-3xl">
+              <button
+                onClick={() => setIsExportModalOpen(false)}
+                className="px-4 py-2 border border-zinc-850 hover:bg-zinc-900 text-zinc-300 font-extrabold text-[10px] uppercase tracking-wider rounded-xl transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setIsExportModalOpen(false);
+                  handleExportVideo();
+                }}
+                className="bg-cyan-400 hover:bg-cyan-500 text-zinc-950 font-black px-6 py-2 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)] flex items-center space-x-1.5"
+              >
+                <Download size={12} />
+                <span>Start GPU Render</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Exporter Progress HUD overlay modal */}
       {isExporting && (
         <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 space-y-6">
@@ -1373,6 +1742,7 @@ export default function Workspace() {
       <div className="lg:col-span-8 flex flex-col space-y-4">
         {/* Main Video Overlay container */}
         <div
+          ref={videoContainerRef}
           className="relative bg-zinc-950 rounded-3xl border border-zinc-800/80 shadow-2xl overflow-hidden aspect-video w-full"
           onMouseMove={handleOverlayMouseMove}
           onMouseUp={handleOverlayMouseUp}
@@ -1530,21 +1900,34 @@ export default function Workspace() {
               {isPlaying ? <Pause size={18} /> : <Play size={18} />}
             </button>
 
-            {/* Main Video Progress slider */}
-            <input
-              type="range"
-              min={0}
-              max={videoDuration || 100}
-              step={0.05}
-              value={currentTime}
-              disabled={!videoUrl}
-              onChange={(e) => {
-                const val = parseFloat(e.target.value);
-                setCurrentTime(val);
-                if (videoRef.current) videoRef.current.currentTime = val;
-              }}
-              className="flex-grow accent-cyan-400 h-1.5 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed"
-            />
+            {/* Main Video Progress slider with range mark */}
+            <div className="relative flex-grow h-6 flex items-center">
+              {/* Shaded trim range marker behind slider */}
+              {videoDuration > 0 && exportEnd > 0 && (
+                <div
+                  className="absolute h-1 bg-cyan-400/35 border-l border-r border-cyan-400/80 rounded"
+                  style={{
+                    left: `${(exportStart / videoDuration) * 100}%`,
+                    width: `${((exportEnd - exportStart) / videoDuration) * 100}%`,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
+              <input
+                type="range"
+                min={0}
+                max={videoDuration || 100}
+                step={0.05}
+                value={currentTime}
+                disabled={!videoUrl}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setCurrentTime(val);
+                  if (videoRef.current) videoRef.current.currentTime = val;
+                }}
+                className="w-full accent-cyan-400 h-1 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed z-10"
+              />
+            </div>
 
             <div className="text-xs font-mono text-zinc-400 select-none">
               {Math.floor(currentTime / 60)}:
@@ -1553,6 +1936,27 @@ export default function Workspace() {
               {Math.floor(videoDuration / 60)}:
               {String(Math.floor(videoDuration % 60)).padStart(2, "0")}
             </div>
+
+            <button
+              onClick={() => {
+                if (videoContainerRef.current) {
+                  if (document.fullscreenElement) {
+                    document.exitFullscreen();
+                  } else {
+                    videoContainerRef.current.requestFullscreen();
+                  }
+                }
+              }}
+              disabled={!videoUrl}
+              className={`p-2.5 rounded-xl transition ml-2 ${
+                videoUrl
+                  ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-100 cursor-pointer"
+                  : "bg-zinc-900 text-zinc-700 cursor-not-allowed"
+              }`}
+              title="Fullscreen"
+            >
+              <Maximize size={16} />
+            </button>
           </div>
 
           {/* Sync timeline helper details */}
@@ -1706,8 +2110,12 @@ export default function Workspace() {
               GPU hardware-accelerated.
             </p>
 
+            {/* Range Selectors */}
             <button
-              onClick={handleExportVideo}
+              onClick={() => {
+                setIsExportModalOpen(true);
+                setExportPreviewTime(exportStart);
+              }}
               className="w-full bg-cyan-400 hover:bg-cyan-550 text-zinc-950 font-black py-3 rounded-xl text-xs uppercase transition tracking-widest flex items-center justify-center space-x-2 cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)]"
             >
               <Download size={14} />
