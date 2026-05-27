@@ -17,4 +17,3 @@ Before any Next.js work, find and read the relevant doc in `node_modules/next/di
 - When you are not sure about something, ask me.
 - No JSX comments.
 - Always follow the design system documented in `DESIGN.md` for any UI work.
-- No `pnpm build` command, just check `tsc`.
