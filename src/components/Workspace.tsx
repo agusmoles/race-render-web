@@ -723,15 +723,42 @@ export default function Workspace() {
       const actualMime = options.mimeType || "video/webm";
       const fileExt = actualMime.includes("mp4") ? "mp4" : "webm";
       const blob = new Blob(chunks, { type: actualMime });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `overlay_render.${fileExt}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      setIsExporting(false);
+
+      const finishExport = (finalBlob: Blob) => {
+        const url = URL.createObjectURL(finalBlob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `overlay_render.${fileExt}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setIsExporting(false);
+      };
+
+      if (fileExt === "webm") {
+        import("fix-webm-duration").then((fixWebmDuration) => {
+          const durationMs = (actualEnd - actualStart) * 1000;
+          // fix-webm-duration supports Promise-style if callback is omitted.
+          // Note: default import handling for dynamic imports.
+          const ysFixWebmDuration = fixWebmDuration.default || fixWebmDuration;
+          if (typeof ysFixWebmDuration === "function") {
+            ysFixWebmDuration(blob, durationMs, { logger: false })
+              .then(finishExport)
+              .catch((err: Error) => {
+                console.error("Failed to fix webm duration", err);
+                finishExport(blob);
+              });
+          } else {
+            finishExport(blob);
+          }
+        }).catch((err) => {
+          console.error("Failed to load fix-webm-duration", err);
+          finishExport(blob);
+        });
+      } else {
+        finishExport(blob);
+      }
     };
 
     // Find starting video and relative time
