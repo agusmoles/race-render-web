@@ -69,12 +69,14 @@ export default function Workspace() {
 
   // HUD layout config
   const [isEditMode, setIsEditMode] = useState(false);
-  const [layoutConfig, setLayoutConfig] = useState<Record<string, WidgetLayout>>({
+  const [layoutConfig, setLayoutConfig] = useState<
+    Record<string, WidgetLayout>
+  >({
     speedometer: { x: 3, y: 70, w: 20, h: 25, visible: true },
     rpmGauge: { x: 20, y: 72, w: 18, h: 23, visible: true },
     gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
     trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
-    lapTimer: { x: 3, y: 3, w: 24, h: 16, visible: true },
+    lapTimer: { x: 3, y: 3, w: 26, h: 16, visible: true },
   });
 
   // Video Ref & Playback state
@@ -145,7 +147,12 @@ export default function Workspace() {
   }, [localTelemetry]);
 
   const lapTimes = useMemo(() => {
-    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return { laps: {} as Record<number, number>, starts: {} as Record<number, number>, ends: {} as Record<number, number> };
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0)
+      return {
+        laps: {} as Record<number, number>,
+        starts: {} as Record<number, number>,
+        ends: {} as Record<number, number>,
+      };
     const laps: Record<number, number> = {};
     const starts: Record<number, number> = {};
     const ends: Record<number, number> = {};
@@ -160,7 +167,9 @@ export default function Workspace() {
       }
     });
 
-    const lapKeys = Object.keys(starts).map(Number).sort((a, b) => a - b);
+    const lapKeys = Object.keys(starts)
+      .map(Number)
+      .sort((a, b) => a - b);
     lapKeys.forEach((k, idx) => {
       if (idx < lapKeys.length - 1) {
         laps[k] = starts[lapKeys[idx + 1]] - starts[k];
@@ -174,7 +183,9 @@ export default function Workspace() {
 
   const bestLapInfo = useMemo(() => {
     if (!lapTimes || !lapTimes.laps) return { lap: 0, time: 0 };
-    const lapKeys = Object.keys(lapTimes.laps).map(Number).sort((a, b) => a - b);
+    const lapKeys = Object.keys(lapTimes.laps)
+      .map(Number)
+      .sort((a, b) => a - b);
     if (lapKeys.length === 0) return { lap: 0, time: 0 };
 
     let bestLap = 0;
@@ -198,7 +209,9 @@ export default function Workspace() {
       }
     });
 
-    return bestTime === Infinity ? { lap: 0, time: 0 } : { lap: bestLap, time: bestTime };
+    return bestTime === Infinity
+      ? { lap: 0, time: 0 }
+      : { lap: bestLap, time: bestTime };
   }, [lapTimes]);
 
   const formatLapTime = (secs: number) => {
@@ -286,7 +299,7 @@ export default function Workspace() {
       videoUrls.forEach((url) => URL.revokeObjectURL(url));
 
       const files = Array.from(e.target.files).sort((a, b) =>
-        a.name.localeCompare(b.name)
+        a.name.localeCompare(b.name),
       );
       setVideoFiles(files);
       const urls = files.map((f) => URL.createObjectURL(f));
@@ -305,8 +318,8 @@ export default function Workspace() {
               video.preload = "metadata";
               video.onloadedmetadata = () => resolve(video.duration);
               video.src = url;
-            })
-        )
+            }),
+        ),
       );
       setVideoDurations(durations);
       const total = durations.reduce((a, b) => a + b, 0);
@@ -353,7 +366,9 @@ export default function Workspace() {
       }
 
       const localVideoTime = videoRef.current.currentTime;
-      const globalVideoTime = videoDurations.slice(0, activeVideoIndex).reduce((a, b) => a + b, 0) + localVideoTime;
+      const globalVideoTime =
+        videoDurations.slice(0, activeVideoIndex).reduce((a, b) => a + b, 0) +
+        localVideoTime;
 
       // OPTIMIZATION: Only update states and trigger re-renders if the video play clock actually advanced
       if (globalVideoTime !== lastTime) {
@@ -446,7 +461,13 @@ export default function Workspace() {
 
     animationFrameId = requestAnimationFrame(updateInterpolatedTelemetry);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [localTelemetry, syncOffset, speedScale, activeVideoIndex, videoDurations]);
+  }, [
+    localTelemetry,
+    syncOffset,
+    speedScale,
+    activeVideoIndex,
+    videoDurations,
+  ]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -622,7 +643,7 @@ export default function Workspace() {
           v.onloadeddata = () => resolve();
         });
         return v;
-      })
+      }),
     );
 
     let currentExportVideoIndex = 0;
@@ -636,7 +657,8 @@ export default function Workspace() {
     try {
       const audioCtx = new (
         window.AudioContext ||
-        (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext
       )();
 
       // Explicitly resume the AudioContext (browsers block background audio until resumed)
@@ -645,17 +667,17 @@ export default function Workspace() {
       }
 
       const dest = audioCtx.createMediaStreamDestination();
-      
+
       // Pipe all video audio sources to our recording stream destination
       exportVideos.forEach((v) => {
         const source = audioCtx.createMediaElementSource(v);
         source.connect(dest);
       });
-      
+
       // NOTE: We do NOT connect source to audioCtx.destination!
       // This prevents the audio from double-playing through the user's speakers,
       // but still captures it perfectly into the output recording stream!
-      
+
       audioStreamTrack = dest.stream.getAudioTracks()[0];
     } catch (e) {
       console.warn("Could not capture video audio stream track:", e);
@@ -674,7 +696,7 @@ export default function Workspace() {
       "video/mp4;codecs=avc1",
       "video/webm;codecs=vp8,opus",
       "video/webm;codecs=vp9,opus",
-      "video/webm"
+      "video/webm",
     ];
     for (const mimeType of preferredTypes) {
       if (MediaRecorder.isTypeSupported(mimeType)) {
@@ -693,7 +715,7 @@ export default function Workspace() {
 
     mediaRecorder.onstop = () => {
       isRecording = false;
-      exportVideos.forEach(v => {
+      exportVideos.forEach((v) => {
         if (v.parentNode) {
           document.body.removeChild(v);
         }
@@ -716,14 +738,17 @@ export default function Workspace() {
     let relativeStart = actualStart;
     let cumulative = 0;
     for (let i = 0; i < videoDurations.length; i++) {
-      if (actualStart < cumulative + videoDurations[i] || i === videoDurations.length - 1) {
+      if (
+        actualStart < cumulative + videoDurations[i] ||
+        i === videoDurations.length - 1
+      ) {
         currentExportVideoIndex = i;
         relativeStart = actualStart - cumulative;
         break;
       }
       cumulative += videoDurations[i];
     }
-    
+
     exportVideo = exportVideos[currentExportVideoIndex];
     exportVideo.currentTime = relativeStart;
 
@@ -735,21 +760,27 @@ export default function Workspace() {
     };
     exportVideo.addEventListener("seeked", onSeeked);
 
-    let gHistory: {x: number, y: number}[] = [];
+    let gHistory: { x: number; y: number }[] = [];
     let trackPath = "";
     let trackScale = 1;
     let trackMinLon = 0;
     let trackMaxLat = 0;
     let trackHasGPS = false;
     let tPadding = 20;
-    let tSvgW = 200, tSvgH = 200;
+    let tSvgW = 200,
+      tSvgH = 200;
     let trackLonSpan = 0;
     let trackLatSpan = 0;
 
     if (localTelemetry?.rows && localTelemetry.rows.length > 5) {
-      const validPoints = localTelemetry.rows.filter((p: any) => p.lat !== 0 && p.lon !== 0);
+      const validPoints = localTelemetry.rows.filter(
+        (p: any) => p.lat !== 0 && p.lon !== 0,
+      );
       if (validPoints.length > 5) {
-        let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+        let minLat = Infinity,
+          maxLat = -Infinity,
+          minLon = Infinity,
+          maxLon = -Infinity;
         for (const p of validPoints) {
           if (p.lat < minLat) minLat = p.lat;
           if (p.lat > maxLat) maxLat = p.lat;
@@ -765,10 +796,16 @@ export default function Workspace() {
           trackScale = Math.min(scaleX, scaleY);
           trackMinLon = minLon;
           trackMaxLat = maxLat;
-          
+
           validPoints.forEach((p: any, idx: number) => {
-            const x = tPadding + (p.lon - minLon) * trackScale + (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
-            const y = tPadding + (maxLat - p.lat) * trackScale + (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
+            const x =
+              tPadding +
+              (p.lon - minLon) * trackScale +
+              (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
+            const y =
+              tPadding +
+              (maxLat - p.lat) * trackScale +
+              (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
             if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
             else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
           });
@@ -776,17 +813,24 @@ export default function Workspace() {
         }
       }
     }
-    
+
     const cachedPath2D = trackHasGPS ? new Path2D(trackPath) : null;
 
     const renderLoop = () => {
       if (!isRecording) return;
 
       const vTimeLocal = exportVideo.currentTime;
-      const vTime = videoDurations.slice(0, currentExportVideoIndex).reduce((a, b) => a + b, 0) + vTimeLocal;
+      const vTime =
+        videoDurations
+          .slice(0, currentExportVideoIndex)
+          .reduce((a, b) => a + b, 0) + vTimeLocal;
 
       if (vTime >= actualEnd || exportVideo.ended) {
-        if (exportVideo.ended && currentExportVideoIndex < exportVideos.length - 1 && vTime < actualEnd) {
+        if (
+          exportVideo.ended &&
+          currentExportVideoIndex < exportVideos.length - 1 &&
+          vTime < actualEnd
+        ) {
           // Move to next video
           currentExportVideoIndex++;
           exportVideo = exportVideos[currentExportVideoIndex];
@@ -808,7 +852,15 @@ export default function Workspace() {
 
       // 2. Interpolate active telemetry metrics
       const totalExportDuration = actualEnd - actualStart;
-      setExportProgress(Math.max(0, Math.min(100, Math.round(((vTime - actualStart) / totalExportDuration) * 100))));
+      setExportProgress(
+        Math.max(
+          0,
+          Math.min(
+            100,
+            Math.round(((vTime - actualStart) / totalExportDuration) * 100),
+          ),
+        ),
+      );
 
       const tTime = (vTime - syncOffset) * speedScale;
       const rows = localTelemetry.rows;
@@ -866,30 +918,44 @@ export default function Workspace() {
       }
 
       // Maintain G-Force trace history
-      if (gHistory.length === 0 || gHistory[gHistory.length - 1].x !== matchedTelemetry.latAcc || gHistory[gHistory.length - 1].y !== matchedTelemetry.lonAcc) {
-        gHistory.push({ x: matchedTelemetry.latAcc, y: matchedTelemetry.lonAcc });
+      if (
+        gHistory.length === 0 ||
+        gHistory[gHistory.length - 1].x !== matchedTelemetry.latAcc ||
+        gHistory[gHistory.length - 1].y !== matchedTelemetry.lonAcc
+      ) {
+        gHistory.push({
+          x: matchedTelemetry.latAcc,
+          y: matchedTelemetry.lonAcc,
+        });
         if (gHistory.length > 6) gHistory.shift();
       }
 
       // 3. Render Telemetry overlays on top of the canvas frame
-      drawCanvasHUD(ctx, canvas.width, canvas.height, matchedTelemetry, gHistory, {
-        cachedPath2D,
-        trackScale,
-        trackMinLon,
-        trackMaxLat,
-        trackHasGPS,
-        tSvgW,
-        tSvgH,
-        tPadding,
-        trackLonSpan,
-        trackLatSpan,
-        telemetryTime: tTime,
-        lapTimesStarts: lapTimes.starts,
-        lapTimesLaps: lapTimes.laps,
-        formatLapTime,
-        bestLapTimeStr: formatLapTime(bestLapInfo.time),
-        bestLapNum: bestLapInfo.lap,
-      });
+      drawCanvasHUD(
+        ctx,
+        canvas.width,
+        canvas.height,
+        matchedTelemetry,
+        gHistory,
+        {
+          cachedPath2D,
+          trackScale,
+          trackMinLon,
+          trackMaxLat,
+          trackHasGPS,
+          tSvgW,
+          tSvgH,
+          tPadding,
+          trackLonSpan,
+          trackLatSpan,
+          telemetryTime: tTime,
+          lapTimesStarts: lapTimes.starts,
+          lapTimesLaps: lapTimes.laps,
+          formatLapTime,
+          bestLapTimeStr: formatLapTime(bestLapInfo.time),
+          bestLapNum: bestLapInfo.lap,
+        },
+      );
 
       requestAnimationFrame(renderLoop);
     };
@@ -913,7 +979,7 @@ export default function Workspace() {
       lon: number;
       lap: number;
     },
-    gHistory: {x: number, y: number}[],
+    gHistory: { x: number; y: number }[],
     trackMapProps: any,
   ) => {
     ctx.save();
@@ -970,7 +1036,7 @@ export default function Workspace() {
 
       const cx = wX + wW / 2;
       const cy = wY + wH / 2;
-      const r = Math.min(wW, wH) * 0.30;
+      const r = Math.min(wW, wH) * 0.3;
       const maxRpm = 15000;
       const clampedPct = Math.min(1, Math.max(0, tel.rpm / maxRpm));
 
@@ -1029,7 +1095,7 @@ export default function Workspace() {
       ctx.fillText(`LAT: `, cx - r * 0.4, cy - r - r * 0.2);
       ctx.fillStyle = "rgba(255,255,255,0.9)";
       ctx.fillText(`${tel.latAcc.toFixed(2)}G`, cx - r * 0.1, cy - r - r * 0.2);
-      
+
       ctx.fillStyle = "rgba(255,255,255,0.7)";
       ctx.fillText(`LON: `, cx + r * 0.4, cy - r - r * 0.2);
       ctx.fillStyle = "rgba(255,255,255,0.9)";
@@ -1075,7 +1141,7 @@ export default function Workspace() {
       gHistory.slice(0, -1).forEach((gPoint, index) => {
         const coords = getGCoords(gPoint.x, gPoint.y);
         const opacity = (index + 1) / gHistory.length;
-        const size = (r * 0.03) + opacity * (r * 0.05);
+        const size = r * 0.03 + opacity * (r * 0.05);
         ctx.beginPath();
         ctx.arc(coords.x, coords.y, size, 0, 2 * Math.PI);
         ctx.fillStyle = `rgba(244, 63, 94, ${opacity * 0.4})`;
@@ -1105,7 +1171,10 @@ export default function Workspace() {
       const wH = (layoutConfig.trackMap.h / 100) * height;
 
       // Create a clipping region or just scale perfectly into the box
-      const scaleToFit = Math.min(wW / trackMapProps.tSvgW, wH / trackMapProps.tSvgH);
+      const scaleToFit = Math.min(
+        wW / trackMapProps.tSvgW,
+        wH / trackMapProps.tSvgH,
+      );
       const cx = wX + (wW - trackMapProps.tSvgW * scaleToFit) / 2;
       const cy = wY + (wH - trackMapProps.tSvgH * scaleToFit) / 2;
 
@@ -1128,8 +1197,20 @@ export default function Workspace() {
 
       // Draw current pos
       if (tel.lat !== 0 && tel.lon !== 0) {
-        const ptX = trackMapProps.tPadding + (tel.lon - trackMapProps.trackMinLon) * trackMapProps.trackScale + (trackMapProps.tSvgW - trackMapProps.tPadding * 2 - trackMapProps.trackLonSpan * trackMapProps.trackScale) / 2;
-        const ptY = trackMapProps.tPadding + (trackMapProps.trackMaxLat - tel.lat) * trackMapProps.trackScale + (trackMapProps.tSvgH - trackMapProps.tPadding * 2 - trackMapProps.trackLatSpan * trackMapProps.trackScale) / 2;
+        const ptX =
+          trackMapProps.tPadding +
+          (tel.lon - trackMapProps.trackMinLon) * trackMapProps.trackScale +
+          (trackMapProps.tSvgW -
+            trackMapProps.tPadding * 2 -
+            trackMapProps.trackLonSpan * trackMapProps.trackScale) /
+            2;
+        const ptY =
+          trackMapProps.tPadding +
+          (trackMapProps.trackMaxLat - tel.lat) * trackMapProps.trackScale +
+          (trackMapProps.tSvgH -
+            trackMapProps.tPadding * 2 -
+            trackMapProps.trackLatSpan * trackMapProps.trackScale) /
+            2;
 
         ctx.beginPath();
         ctx.arc(ptX, ptY, 5, 0, 2 * Math.PI);
@@ -1152,59 +1233,94 @@ export default function Workspace() {
       const wX = (layoutConfig.lapTimer.x / 100) * width;
       const wY = (layoutConfig.lapTimer.y / 100) * height;
       const wW = (layoutConfig.lapTimer.w / 100) * width;
-      const wH = (layoutConfig.lapTimer.h / 100) * height;
+      const cqw = wW / 100;
+      const wH = 34 * cqw; // matches React component height: 5(pt) + 4.5(lap) + 2.5(mt) + 3.5(label) + 0.5(mt) + 12(value) + 6(pb) = 34cqw
 
       ctx.save();
+      
+      // Background and border-radius
+      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
       ctx.fillStyle = "rgba(9, 9, 11, 0.7)";
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.8)";
-      ctx.lineWidth = 1.5;
-      drawRoundedRect(ctx, wX, wY, wW, wH, 12);
       ctx.fill();
+      
+      // Left border clip & draw
+      ctx.save();
+      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
+      ctx.clip();
+      ctx.fillStyle = "#22d3ee";
+      ctx.fillRect(wX, wY, 1.5 * cqw, wH);
+      ctx.restore();
+
+      // Outer border
+      ctx.strokeStyle = "rgba(39, 39, 42, 0.8)";
+      ctx.lineWidth = 1;
+      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
       ctx.stroke();
 
-      ctx.beginPath();
-      ctx.moveTo(wX + 3, wY + 3);
-      ctx.lineTo(wX + 3, wY + wH - 3);
-      ctx.strokeStyle = "#22d3ee";
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      ctx.stroke();
-
-      const elapsed = Math.max(0, (trackMapProps.telemetryTime || 0) - (trackMapProps.lapTimesStarts?.[tel.lap] || 0));
-      const curTimeStr = trackMapProps.formatLapTime ? trackMapProps.formatLapTime(elapsed) : "0:00.00";
+      const elapsed = Math.max(
+        0,
+        (trackMapProps.telemetryTime || 0) -
+          (trackMapProps.lapTimesStarts?.[tel.lap] || 0),
+      );
+      const curTimeStr = trackMapProps.formatLapTime
+        ? trackMapProps.formatLapTime(elapsed)
+        : "0:00.00";
       const bestTimeStr = trackMapProps.bestLapTimeStr || "0:00.00";
 
-      ctx.fillStyle = "#22d3ee";
-      ctx.font = `black ${Math.max(10, wH * 0.12)}px sans-serif`;
-      ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText(`LAP ${tel.lap}`, wX + 12, wY + wH * 0.1);
 
+      // LAP Text
+      ctx.fillStyle = "#22d3ee";
+      ctx.font = `900 ${4.5 * cqw}px sans-serif`;
+      ctx.textAlign = "left";
+      ctx.fillText(`LAP ${tel.lap}`, wX + 5 * cqw, wY + 5 * cqw);
+
+      // Best and Last Lap Times
+      let rightY = wY + 5 * cqw;
+      
       if (bestTimeStr !== "0:00.00") {
-        ctx.fillStyle = "#10b981";
-        ctx.font = `bold ${Math.max(8, wH * 0.1)}px monospace`;
         ctx.textAlign = "right";
         const bestLabel = trackMapProps.bestLapNum > 0 ? `BEST (L${trackMapProps.bestLapNum}):` : "BEST:";
-        ctx.fillText(`${bestLabel} ${bestTimeStr}`, wX + wW - 12, wY + wH * 0.1);
+        
+        ctx.fillStyle = "#10b981"; // emerald-400
+        ctx.font = `900 ${4.5 * cqw}px monospace`;
+        const timeWidth = ctx.measureText(bestTimeStr).width;
+        
+        ctx.fillText(bestTimeStr, wX + wW - 5 * cqw, rightY);
+        
+        ctx.fillStyle = "#71717a"; // zinc-500
+        ctx.font = `900 ${3.5 * cqw}px sans-serif`;
+        ctx.fillText(bestLabel, wX + wW - 5 * cqw - timeWidth - 1.5 * cqw, rightY + 0.5 * cqw);
+        
+        rightY += 4.5 * cqw + 0.5 * cqw;
       }
 
       const prevDuration = trackMapProps.lapTimesLaps?.[tel.lap - 1] || 0;
       if (prevDuration > 0 && trackMapProps.formatLapTime) {
         const lastTimeStr = trackMapProps.formatLapTime(prevDuration);
-        ctx.fillStyle = "#d4d4d8";
-        ctx.font = `bold ${Math.max(8, wH * 0.1)}px monospace`;
         ctx.textAlign = "right";
-        ctx.fillText(`LAST: ${lastTimeStr}`, wX + wW - Math.max(80, wW * 0.35), wY + wH * 0.1);
+        
+        ctx.fillStyle = "#d4d4d8"; // zinc-300
+        ctx.font = `bold ${4.5 * cqw}px monospace`;
+        const timeWidth = ctx.measureText(lastTimeStr).width;
+        
+        ctx.fillText(lastTimeStr, wX + wW - 5 * cqw, rightY);
+        
+        ctx.fillStyle = "#71717a"; // zinc-500
+        ctx.font = `900 ${3.5 * cqw}px sans-serif`;
+        ctx.fillText("LAST:", wX + wW - 5 * cqw - timeWidth - 1.5 * cqw, rightY + 0.5 * cqw);
       }
 
-      ctx.fillStyle = "rgba(244, 244, 245, 0.6)";
-      ctx.font = `bold ${Math.max(8, wH * 0.08)}px sans-serif`;
+      // CURRENT TIME Label
+      ctx.fillStyle = "rgba(161, 161, 170, 1)"; // zinc-400
+      ctx.font = `bold ${3.5 * cqw}px sans-serif`;
       ctx.textAlign = "left";
-      ctx.fillText("CURRENT TIME", wX + 12, wY + wH * 0.35);
+      ctx.fillText("CURRENT TIME", wX + 5 * cqw, wY + 12 * cqw);
 
+      // CURRENT TIME Value
       ctx.fillStyle = "#f4f4f5";
-      ctx.font = `black ${Math.max(14, wH * 0.28)}px monospace`;
-      ctx.fillText(curTimeStr, wX + 12, wY + wH * 0.52);
+      ctx.font = `900 ${12 * cqw}px monospace`;
+      ctx.fillText(curTimeStr, wX + 5 * cqw, wY + 16 * cqw);
 
       ctx.restore();
     }
@@ -1266,7 +1382,8 @@ export default function Workspace() {
                   </h3>
                 </div>
                 <p className="text-[9px] text-zinc-550 uppercase tracking-wider mt-0.5 ml-6 font-semibold">
-                  Preview video, select start/end crop marks, and export in ultra-high quality
+                  Preview video, select start/end crop marks, and export in
+                  ultra-high quality
                 </p>
               </div>
               <button
@@ -1287,7 +1404,9 @@ export default function Workspace() {
                   className="w-full h-full object-cover"
                   onTimeUpdate={() => {
                     if (exportPreviewVideoRef.current) {
-                      setExportPreviewTime(exportPreviewVideoRef.current.currentTime);
+                      setExportPreviewTime(
+                        exportPreviewVideoRef.current.currentTime,
+                      );
                     }
                   }}
                   controls
@@ -1297,12 +1416,20 @@ export default function Workspace() {
               {/* Position and Format */}
               <div className="flex justify-between items-center text-xs font-mono text-zinc-400 bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-850">
                 <div className="flex items-center space-x-1.5">
-                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">Position:</span>
-                  <span className="text-cyan-400 font-bold">{formatTimeMinutes(exportPreviewTime)}</span>
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">
+                    Position:
+                  </span>
+                  <span className="text-cyan-400 font-bold">
+                    {formatTimeMinutes(exportPreviewTime)}
+                  </span>
                 </div>
                 <div className="flex items-center space-x-1.5">
-                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">Total Duration:</span>
-                  <span className="text-zinc-300 font-bold">{formatTimeMinutes(videoDuration)}</span>
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">
+                    Total Duration:
+                  </span>
+                  <span className="text-zinc-300 font-bold">
+                    {formatTimeMinutes(videoDuration)}
+                  </span>
                 </div>
               </div>
 
@@ -1313,7 +1440,9 @@ export default function Workspace() {
                   <div className="flex flex-col space-y-1">
                     <div className="flex justify-between items-center text-[10px] text-zinc-400 font-black uppercase">
                       <span>Export Start (Trim In):</span>
-                      <span className="font-mono text-cyan-400 font-bold">{formatTimeMinutes(exportStart)}</span>
+                      <span className="font-mono text-cyan-400 font-bold">
+                        {formatTimeMinutes(exportStart)}
+                      </span>
                     </div>
                     <div className="relative w-full h-6 flex items-center">
                       <div className="absolute w-full h-1 bg-zinc-800 rounded-lg" />
@@ -1335,7 +1464,8 @@ export default function Workspace() {
                           const newStart = Math.min(val, exportEnd);
                           setExportStart(newStart);
                           if (exportPreviewVideoRef.current) {
-                            exportPreviewVideoRef.current.currentTime = newStart;
+                            exportPreviewVideoRef.current.currentTime =
+                              newStart;
                           }
                         }}
                         className="w-full accent-cyan-400 h-1 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
@@ -1347,7 +1477,11 @@ export default function Workspace() {
                     <div className="flex justify-between items-center text-[10px] text-zinc-400 font-black uppercase">
                       <span>Export End (Trim Out):</span>
                       <span className="font-mono text-cyan-400 font-bold">
-                        {formatTimeMinutes(exportEnd === 0 && videoDuration > 0 ? videoDuration : exportEnd)}
+                        {formatTimeMinutes(
+                          exportEnd === 0 && videoDuration > 0
+                            ? videoDuration
+                            : exportEnd,
+                        )}
                       </span>
                     </div>
                     <div className="relative w-full h-6 flex items-center">
@@ -1364,7 +1498,11 @@ export default function Workspace() {
                         min={0}
                         max={videoDuration || 100}
                         step={0.5}
-                        value={exportEnd === 0 && videoDuration > 0 ? videoDuration : exportEnd}
+                        value={
+                          exportEnd === 0 && videoDuration > 0
+                            ? videoDuration
+                            : exportEnd
+                        }
                         onChange={(e) => {
                           const val = parseFloat(e.target.value);
                           const newEnd = Math.max(val, exportStart);
@@ -2114,7 +2252,7 @@ export default function Workspace() {
               {/* LAP TIMER WIDGET */}
               {layoutConfig.lapTimer?.visible && (
                 <div
-                  className={`absolute transition-all duration-75 select-none ${
+                  className={`absolute transition-all duration-75 select-none @container ${
                     isEditMode
                       ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
                       : ""
@@ -2123,7 +2261,7 @@ export default function Workspace() {
                     left: `${layoutConfig.lapTimer.x}%`,
                     top: `${layoutConfig.lapTimer.y}%`,
                     width: `${layoutConfig.lapTimer.w}%`,
-                    height: `${layoutConfig.lapTimer.h}%`,
+                    height: "fit-content",
                   }}
                   onMouseDown={(e) => handleWidgetMouseDown(e, "lapTimer")}
                 >
@@ -2132,7 +2270,9 @@ export default function Workspace() {
                     currentLapTime={formatLapTime(currentLapElapsed)}
                     bestLapTime={formatLapTime(bestLapInfo.time)}
                     bestLapNum={bestLapInfo.lap}
-                    previousLapTime={formatLapTime(lapTimes.laps[currentTelemetry.lap - 1] || 0)}
+                    previousLapTime={formatLapTime(
+                      lapTimes.laps[currentTelemetry.lap - 1] || 0,
+                    )}
                   />
                 </div>
               )}
@@ -2224,13 +2364,16 @@ export default function Workspace() {
                   let t = 0;
                   let idx = 0;
                   for (let i = 0; i < videoDurations.length; i++) {
-                    if (val <= t + videoDurations[i] || i === videoDurations.length - 1) {
+                    if (
+                      val <= t + videoDurations[i] ||
+                      i === videoDurations.length - 1
+                    ) {
                       idx = i;
                       break;
                     }
                     t += videoDurations[i];
                   }
-                  
+
                   if (idx !== activeVideoIndex) {
                     setActiveVideoIndex(idx);
                     if (videoRef.current) {
@@ -2239,7 +2382,8 @@ export default function Workspace() {
                       if (isPlaying) videoRef.current.play();
                     }
                   } else {
-                    if (videoRef.current) videoRef.current.currentTime = val - t;
+                    if (videoRef.current)
+                      videoRef.current.currentTime = val - t;
                   }
                 }}
                 className="w-full accent-cyan-400 h-1 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed z-10"
@@ -2365,7 +2509,9 @@ export default function Workspace() {
               <div className="flex flex-col items-center justify-center space-y-1">
                 <Video size={20} className="text-cyan-400" />
                 <span className="text-[10px] text-zinc-400 font-semibold truncate max-w-55">
-                  {videoFiles.length > 0 ? `${videoFiles.length} video(s) selected` : "Select POV Video"}
+                  {videoFiles.length > 0
+                    ? `${videoFiles.length} video(s) selected`
+                    : "Select POV Video"}
                 </span>
                 <span className="text-[8px] text-zinc-555">
                   Loads locally for maximum GPU rendering speed
