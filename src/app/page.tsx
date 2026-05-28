@@ -1,5 +1,6 @@
 import Workspace from "@/components/Workspace";
 import { Flame } from "lucide-react";
+import Image from "next/image";
 
 export default function Home() {
   return (
@@ -7,9 +8,12 @@ export default function Home() {
       <header className="w-full border-b border-zinc-900 bg-zinc-950/80 backdrop-blur-md sticky top-0 z-30 select-none py-4 px-6">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="p-2 bg-rose-500/10 border border-rose-500/20 rounded-2xl text-rose-500 shadow-[0_0_15px_rgba(244,63,94,0.15)]">
-              <Flame size={22} className="animate-pulse" />
-            </div>
+            <Image
+              src="/assets/images/logo.png"
+              alt="Logo"
+              width={52}
+              height={52}
+            />
             <div className="flex flex-col">
               <h1 className="text-sm font-black uppercase tracking-widest text-zinc-100 flex items-center space-x-1.5">
                 <span>Open RaceRender</span>
