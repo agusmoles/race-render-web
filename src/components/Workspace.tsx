@@ -187,7 +187,10 @@ export default function Workspace() {
       } else {
         laps[k] = ends[k] - starts[k];
         const lapRows = localTelemetry.rows.filter((r) => r.lap === k);
-        const maxDist = lapRows.length > 0 ? Math.max(...lapRows.map((r) => r.distance || 0)) : startDistances[k];
+        const maxDist =
+          lapRows.length > 0
+            ? Math.max(...lapRows.map((r) => r.distance || 0))
+            : startDistances[k];
         lapDistances[k] = maxDist - startDistances[k];
       }
     });
@@ -249,8 +252,12 @@ export default function Workspace() {
 
     let scaledElapsedDist = elapsedDist;
     if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
-      scaledElapsedDist = elapsedDist * (bestLapTotalDist / currentLapTotalDist);
-      scaledElapsedDist = Math.max(0, Math.min(bestLapTotalDist, scaledElapsedDist));
+      scaledElapsedDist =
+        elapsedDist * (bestLapTotalDist / currentLapTotalDist);
+      scaledElapsedDist = Math.max(
+        0,
+        Math.min(bestLapTotalDist, scaledElapsedDist),
+      );
     }
 
     let low = 0;
@@ -536,7 +543,9 @@ export default function Workspace() {
                 ? 0
                 : rowA.lon + fraction * (rowB.lon - rowA.lon),
               lap: Number(rowA.lap) || 1,
-              distance: isNaN(rowA.distance + fraction * (rowB.distance - rowA.distance))
+              distance: isNaN(
+                rowA.distance + fraction * (rowB.distance - rowA.distance),
+              )
                 ? 0
                 : rowA.distance + fraction * (rowB.distance - rowA.distance),
             });
@@ -570,7 +579,8 @@ export default function Workspace() {
 
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      e.returnValue = "Render in progress. Are you sure you want to close this page?";
+      e.returnValue =
+        "Render in progress. Are you sure you want to close this page?";
       return e.returnValue;
     };
 
@@ -866,25 +876,28 @@ export default function Workspace() {
       };
 
       if (fileExt === "webm") {
-        import("fix-webm-duration").then((fixWebmDuration) => {
-          const durationMs = (actualEnd - actualStart) * 1000;
-          // fix-webm-duration supports Promise-style if callback is omitted.
-          // Note: default import handling for dynamic imports.
-          const ysFixWebmDuration = fixWebmDuration.default || fixWebmDuration;
-          if (typeof ysFixWebmDuration === "function") {
-            ysFixWebmDuration(blob, durationMs, { logger: false })
-              .then(finishExport)
-              .catch((err: Error) => {
-                console.error("Failed to fix webm duration", err);
-                finishExport(blob);
-              });
-          } else {
+        import("fix-webm-duration")
+          .then((fixWebmDuration) => {
+            const durationMs = (actualEnd - actualStart) * 1000;
+            // fix-webm-duration supports Promise-style if callback is omitted.
+            // Note: default import handling for dynamic imports.
+            const ysFixWebmDuration =
+              fixWebmDuration.default || fixWebmDuration;
+            if (typeof ysFixWebmDuration === "function") {
+              ysFixWebmDuration(blob, durationMs, { logger: false })
+                .then(finishExport)
+                .catch((err: Error) => {
+                  console.error("Failed to fix webm duration", err);
+                  finishExport(blob);
+                });
+            } else {
+              finishExport(blob);
+            }
+          })
+          .catch((err) => {
+            console.error("Failed to load fix-webm-duration", err);
             finishExport(blob);
-          }
-        }).catch((err) => {
-          console.error("Failed to load fix-webm-duration", err);
-          finishExport(blob);
-        });
+          });
       } else {
         finishExport(blob);
       }
@@ -1414,12 +1427,12 @@ export default function Workspace() {
       const wH = 34 * cqw; // matches React component height: 5(pt) + 4.5(lap) + 2.5(mt) + 3.5(label) + 0.5(mt) + 12(value) + 6(pb) = 34cqw
 
       ctx.save();
-      
+
       // Background and border-radius
       drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
       ctx.fillStyle = "rgba(9, 9, 11, 0.7)";
       ctx.fill();
-      
+
       // Left border clip & draw
       ctx.save();
       drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
@@ -1454,21 +1467,28 @@ export default function Workspace() {
 
       // Best and Last Lap Times
       let rightY = wY + 5 * cqw;
-      
+
       if (bestTimeStr !== "0:00.00") {
         ctx.textAlign = "right";
-        const bestLabel = trackMapProps.bestLapNum > 0 ? `BEST (L${trackMapProps.bestLapNum}):` : "BEST:";
-        
+        const bestLabel =
+          trackMapProps.bestLapNum > 0
+            ? `BEST (L${trackMapProps.bestLapNum}):`
+            : "BEST:";
+
         ctx.fillStyle = "#10b981"; // emerald-400
         ctx.font = `900 ${4.5 * cqw}px monospace`;
         const timeWidth = ctx.measureText(bestTimeStr).width;
-        
+
         ctx.fillText(bestTimeStr, wX + wW - 5 * cqw, rightY);
-        
+
         ctx.fillStyle = "#71717a"; // zinc-500
         ctx.font = `900 ${3.5 * cqw}px sans-serif`;
-        ctx.fillText(bestLabel, wX + wW - 5 * cqw - timeWidth - 1.5 * cqw, rightY + 0.5 * cqw);
-        
+        ctx.fillText(
+          bestLabel,
+          wX + wW - 5 * cqw - timeWidth - 1.5 * cqw,
+          rightY + 0.5 * cqw,
+        );
+
         rightY += 4.5 * cqw + 0.5 * cqw;
       }
 
@@ -1476,16 +1496,20 @@ export default function Workspace() {
       if (prevDuration > 0 && trackMapProps.formatLapTime) {
         const lastTimeStr = trackMapProps.formatLapTime(prevDuration);
         ctx.textAlign = "right";
-        
+
         ctx.fillStyle = "#d4d4d8"; // zinc-300
         ctx.font = `bold ${4.5 * cqw}px monospace`;
         const timeWidth = ctx.measureText(lastTimeStr).width;
-        
+
         ctx.fillText(lastTimeStr, wX + wW - 5 * cqw, rightY);
-        
+
         ctx.fillStyle = "#71717a"; // zinc-500
         ctx.font = `900 ${3.5 * cqw}px sans-serif`;
-        ctx.fillText("LAST:", wX + wW - 5 * cqw - timeWidth - 1.5 * cqw, rightY + 0.5 * cqw);
+        ctx.fillText(
+          "LAST:",
+          wX + wW - 5 * cqw - timeWidth - 1.5 * cqw,
+          rightY + 0.5 * cqw,
+        );
       }
 
       // CURRENT TIME Label
@@ -1514,19 +1538,19 @@ export default function Workspace() {
       const bestLapNum = trackMapProps.bestLapNum || 0;
       const bestLapRows = trackMapProps.bestLapRows || [];
       const hasBestLap = bestLapNum > 0 && bestLapRows.length > 0;
-      
+
       let delta = 0;
       if (hasBestLap && tel.lap !== bestLapNum) {
         const startDistances = trackMapProps.lapTimesStartDistances || {};
         const starts = trackMapProps.lapTimesStarts || {};
         const lapDistances = trackMapProps.lapTimesDistances || {};
-        
+
         const curStartDist = startDistances[tel.lap] || 0;
         const curStartTime = starts[tel.lap] || 0;
-        
+
         const elapsedDist = tel.distance - curStartDist;
         const elapsedTime = (trackMapProps.telemetryTime || 0) - curStartTime;
-        
+
         const bestStartDist = startDistances[bestLapNum] || 0;
         const bestStartTime = starts[bestLapNum] || 0;
 
@@ -1535,8 +1559,12 @@ export default function Workspace() {
 
         let scaledElapsedDist = elapsedDist;
         if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
-          scaledElapsedDist = elapsedDist * (bestLapTotalDist / currentLapTotalDist);
-          scaledElapsedDist = Math.max(0, Math.min(bestLapTotalDist, scaledElapsedDist));
+          scaledElapsedDist =
+            elapsedDist * (bestLapTotalDist / currentLapTotalDist);
+          scaledElapsedDist = Math.max(
+            0,
+            Math.min(bestLapTotalDist, scaledElapsedDist),
+          );
         }
 
         let low = 0;
@@ -1570,7 +1598,10 @@ export default function Workspace() {
 
           let fraction = 0;
           if (distB !== distA) {
-            fraction = Math.max(0, Math.min(1, (scaledElapsedDist - distA) / (distB - distA)));
+            fraction = Math.max(
+              0,
+              Math.min(1, (scaledElapsedDist - distA) / (distB - distA)),
+            );
           }
 
           const timeA = rowA.time - bestStartTime;
@@ -1630,7 +1661,7 @@ export default function Workspace() {
         const clampedDelta = Math.max(-clampLimit, Math.min(clampLimit, delta));
         const barPercent = Math.abs(clampedDelta) / clampLimit;
         const fillW = barPercent * (barW / 2);
-        
+
         ctx.save();
         // Clip to the track's rounded rect so ends are rounded perfectly
         drawRoundedRect(ctx, barX, barY, barW, barH, 1.5 * cqw);
@@ -1746,8 +1777,12 @@ export default function Workspace() {
                   className="w-full h-full object-cover"
                   onTimeUpdate={() => {
                     if (exportPreviewVideoRef.current) {
-                      const localTime = exportPreviewVideoRef.current.currentTime;
-                      const globalTime = videoDurations.slice(0, exportActiveVideoIndex).reduce((a, b) => a + b, 0) + localTime;
+                      const localTime =
+                        exportPreviewVideoRef.current.currentTime;
+                      const globalTime =
+                        videoDurations
+                          .slice(0, exportActiveVideoIndex)
+                          .reduce((a, b) => a + b, 0) + localTime;
                       setExportPreviewTime(globalTime);
                     }
                   }}
@@ -1758,7 +1793,9 @@ export default function Workspace() {
                       if (exportPreviewVideoRef.current) {
                         exportPreviewVideoRef.current.src = videoUrls[nextIdx];
                         exportPreviewVideoRef.current.currentTime = 0;
-                        exportPreviewVideoRef.current.play().catch((err) => console.error(err));
+                        exportPreviewVideoRef.current
+                          .play()
+                          .catch((err) => console.error(err));
                       }
                     }
                   }}
@@ -1895,10 +1932,7 @@ export default function Workspace() {
         <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 p-6">
           <div className="p-6 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-3xl text-center space-y-5 max-w-xl w-full shadow-2xl relative flex flex-col items-center">
             <div className="flex items-center space-x-3">
-              <RefreshCw
-                size={24}
-                className="animate-spin text-cyan-400"
-              />
+              <RefreshCw size={24} className="animate-spin text-cyan-400" />
               <div>
                 <h3 className="text-sm font-black uppercase tracking-wider text-zinc-100">
                   Exporting Telemetry Overlay
@@ -1935,15 +1969,21 @@ export default function Workspace() {
               </div>
               <div className="flex justify-between items-center text-xs font-mono font-bold text-zinc-400">
                 <span>{exportProgress}% Completed</span>
-                <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">Active GPU Render</span>
+                <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">
+                  Active GPU Render
+                </span>
               </div>
             </div>
 
             {/* Warning Section */}
             <div className="p-3.5 bg-rose-950/20 border border-rose-900/40 rounded-2xl text-[10px] text-rose-300/90 flex items-start space-x-2 text-left w-full">
-              <span className="font-extrabold uppercase bg-rose-500 text-black px-1 rounded shrink-0">WARNING</span>
+              <span className="font-extrabold uppercase bg-rose-500 text-black px-1 rounded shrink-0">
+                WARNING
+              </span>
               <span className="leading-relaxed">
-                <strong>Keep this window/tab open and active!</strong> Switching tabs, minimizing, or backgrounding the browser will freeze or terminate the GPU render process.
+                <strong>Keep this window/tab open and active!</strong> Switching
+                tabs, minimizing, or backgrounding the browser will freeze or
+                terminate the GPU render process.
               </span>
             </div>
           </div>
@@ -2067,7 +2107,10 @@ export default function Workspace() {
                     </button>
                     <button
                       onClick={() => {
-                        const t = Math.min(videoDuration, modalVideoTime + 1 / 60);
+                        const t = Math.min(
+                          videoDuration,
+                          modalVideoTime + 1 / 60,
+                        );
                         setModalVideoTime(t);
                         if (modalVideoRef.current)
                           modalVideoRef.current.currentTime = t;
@@ -2537,10 +2580,10 @@ export default function Workspace() {
               </div>
               <div>
                 <h3 className="text-lg font-bold text-zinc-200">
-                  Load POV Video
+                  Load POV Video(s)
                 </h3>
                 <p className="text-xs text-zinc-400 max-w-xs mt-1">
-                  Oog! GoPro POV video not loaded! Select local video to overlay
+                  GoPro POV videos not loaded! Select local videos to overlay
                   beautiful telemetry.
                 </p>
               </div>
@@ -2933,7 +2976,7 @@ export default function Workspace() {
                 <span className="text-[10px] text-zinc-400 font-semibold truncate max-w-55">
                   {videoFiles.length > 0
                     ? `${videoFiles.length} video(s) selected`
-                    : "Select POV Video"}
+                    : "Select POV Video(s)"}
                 </span>
                 <span className="text-[8px] text-zinc-555">
                   Loads locally for maximum GPU rendering speed
@@ -3001,18 +3044,21 @@ export default function Workspace() {
               onClick={() => {
                 setIsExportModalOpen(true);
                 setExportPreviewTime(exportStart);
-                
+
                 let t = 0;
                 let idx = 0;
                 for (let i = 0; i < videoDurations.length; i++) {
-                  if (exportStart >= t && exportStart <= t + videoDurations[i]) {
+                  if (
+                    exportStart >= t &&
+                    exportStart <= t + videoDurations[i]
+                  ) {
                     idx = i;
                     break;
                   }
                   t += videoDurations[i];
                 }
                 setExportActiveVideoIndex(idx);
-                
+
                 setTimeout(() => {
                   if (exportPreviewVideoRef.current) {
                     exportPreviewVideoRef.current.src = videoUrls[idx];
