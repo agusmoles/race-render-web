@@ -2760,7 +2760,7 @@ export default function Workspace() {
             </div>
 
             {/* Main Video Progress slider with range mark */}
-            <div className="relative flex-grow h-6 flex items-center">
+            <div className="relative grow h-6 flex items-center">
               {/* Shaded trim range marker behind slider */}
               {videoDuration > 0 && exportEnd > 0 && (
                 <div
@@ -2812,7 +2812,7 @@ export default function Workspace() {
               />
             </div>
 
-            <div className="text-xs font-mono text-zinc-400 select-none tabular-nums w-[110px] text-right">
+            <div className="text-xs font-mono text-zinc-400 select-none tabular-nums w-27.5 text-right">
               {Math.floor(currentTime / 60)}:
               {String(Math.floor(currentTime % 60)).padStart(2, "0")}.
               {String(Math.floor((currentTime % 1) * 10)).padStart(1, "0")} /{" "}
@@ -3076,7 +3076,7 @@ export default function Workspace() {
                         }}
                         className="sr-only peer"
                       />
-                      <div className="w-8 h-4.5 bg-zinc-950 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-zinc-500 after:border-zinc-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-cyan-500 peer-checked:after:bg-zinc-950" />
+                      <div className="w-8 h-4.5 bg-zinc-950 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-zinc-500 after:border-zinc-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-cyan-500 peer-checked:after:bg-zinc-950" />
                     </label>
                   </div>
                 );
