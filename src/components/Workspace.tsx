@@ -125,6 +125,7 @@ export default function Workspace() {
   const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportPreviewTime, setExportPreviewTime] = useState(0);
+  const [exportActiveVideoIndex, setExportActiveVideoIndex] = useState(0);
   const exportPreviewVideoRef = useRef<HTMLVideoElement>(null);
   const [modalVideoTime, setModalVideoTime] = useState(0);
   const [modalTelemetryIdx, setModalTelemetryIdx] = useState(0);
@@ -693,6 +694,31 @@ export default function Workspace() {
     setSyncOffset(parseFloat(computedOffset.toFixed(4)));
     if (videoRef.current) videoRef.current.currentTime = modalVideoTime;
     setIsSyncModalOpen(false);
+  };
+
+  const seekExportPreview = (globalTime: number) => {
+    if (videoUrls.length === 0 || videoDurations.length === 0) return;
+    let t = 0;
+    let idx = 0;
+    for (let i = 0; i < videoDurations.length; i++) {
+      if (globalTime >= t && globalTime <= t + videoDurations[i]) {
+        idx = i;
+        break;
+      }
+      t += videoDurations[i];
+    }
+
+    if (idx !== exportActiveVideoIndex) {
+      setExportActiveVideoIndex(idx);
+      if (exportPreviewVideoRef.current) {
+        exportPreviewVideoRef.current.src = videoUrls[idx];
+        exportPreviewVideoRef.current.currentTime = globalTime - t;
+      }
+    } else {
+      if (exportPreviewVideoRef.current) {
+        exportPreviewVideoRef.current.currentTime = globalTime - t;
+      }
+    }
   };
 
   // GPU ACCELERATED VIDEO OVERLAY EXPORTER
@@ -1716,13 +1742,24 @@ export default function Workspace() {
               <div className="relative aspect-video rounded-2xl overflow-hidden border border-zinc-800 bg-black">
                 <video
                   ref={exportPreviewVideoRef}
-                  src={videoUrls[0]}
+                  src={videoUrls[exportActiveVideoIndex]}
                   className="w-full h-full object-cover"
                   onTimeUpdate={() => {
                     if (exportPreviewVideoRef.current) {
-                      setExportPreviewTime(
-                        exportPreviewVideoRef.current.currentTime,
-                      );
+                      const localTime = exportPreviewVideoRef.current.currentTime;
+                      const globalTime = videoDurations.slice(0, exportActiveVideoIndex).reduce((a, b) => a + b, 0) + localTime;
+                      setExportPreviewTime(globalTime);
+                    }
+                  }}
+                  onEnded={() => {
+                    if (exportActiveVideoIndex < videoUrls.length - 1) {
+                      const nextIdx = exportActiveVideoIndex + 1;
+                      setExportActiveVideoIndex(nextIdx);
+                      if (exportPreviewVideoRef.current) {
+                        exportPreviewVideoRef.current.src = videoUrls[nextIdx];
+                        exportPreviewVideoRef.current.currentTime = 0;
+                        exportPreviewVideoRef.current.play().catch((err) => console.error(err));
+                      }
                     }
                   }}
                   controls
@@ -1779,10 +1816,7 @@ export default function Workspace() {
                           const val = parseFloat(e.target.value);
                           const newStart = Math.min(val, exportEnd);
                           setExportStart(newStart);
-                          if (exportPreviewVideoRef.current) {
-                            exportPreviewVideoRef.current.currentTime =
-                              newStart;
-                          }
+                          seekExportPreview(newStart);
                         }}
                         className="w-full accent-cyan-400 h-1 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
                       />
@@ -1823,9 +1857,7 @@ export default function Workspace() {
                           const val = parseFloat(e.target.value);
                           const newEnd = Math.max(val, exportStart);
                           setExportEnd(newEnd);
-                          if (exportPreviewVideoRef.current) {
-                            exportPreviewVideoRef.current.currentTime = newEnd;
-                          }
+                          seekExportPreview(newEnd);
                         }}
                         className="w-full accent-cyan-400 h-1 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
                       />
@@ -2969,8 +3001,26 @@ export default function Workspace() {
               onClick={() => {
                 setIsExportModalOpen(true);
                 setExportPreviewTime(exportStart);
+                
+                let t = 0;
+                let idx = 0;
+                for (let i = 0; i < videoDurations.length; i++) {
+                  if (exportStart >= t && exportStart <= t + videoDurations[i]) {
+                    idx = i;
+                    break;
+                  }
+                  t += videoDurations[i];
+                }
+                setExportActiveVideoIndex(idx);
+                
+                setTimeout(() => {
+                  if (exportPreviewVideoRef.current) {
+                    exportPreviewVideoRef.current.src = videoUrls[idx];
+                    exportPreviewVideoRef.current.currentTime = exportStart - t;
+                  }
+                }, 50);
               }}
-              className="w-full bg-cyan-400 hover:bg-cyan-550 text-zinc-950 font-black py-3 rounded-xl text-xs uppercase transition tracking-widest flex items-center justify-center space-x-2 cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)]"
+              className="w-full bg-cyan-400 hover:bg-cyan-550 text-zinc-950 font-black py-3 rounded-xl text-xs uppercase transition tracking-widest flex items-center justify-center space-x-2 cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.255)]"
             >
               <Download size={14} />
               <span>Export HUD Overlaid Video</span>
