@@ -156,11 +156,14 @@ export default function Workspace() {
         laps: {} as Record<number, number>,
         starts: {} as Record<number, number>,
         ends: {} as Record<number, number>,
+        startDistances: {} as Record<number, number>,
+        lapDistances: {} as Record<number, number>,
       };
     const laps: Record<number, number> = {};
     const starts: Record<number, number> = {};
     const ends: Record<number, number> = {};
     const startDistances: Record<number, number> = {};
+    const lapDistances: Record<number, number> = {};
 
     localTelemetry.rows.forEach((r) => {
       if (r.lap === undefined || r.lap < 1) return;
@@ -179,12 +182,16 @@ export default function Workspace() {
     lapKeys.forEach((k, idx) => {
       if (idx < lapKeys.length - 1) {
         laps[k] = starts[lapKeys[idx + 1]] - starts[k];
+        lapDistances[k] = startDistances[lapKeys[idx + 1]] - startDistances[k];
       } else {
         laps[k] = ends[k] - starts[k];
+        const lapRows = localTelemetry.rows.filter((r) => r.lap === k);
+        const maxDist = lapRows.length > 0 ? Math.max(...lapRows.map((r) => r.distance || 0)) : startDistances[k];
+        lapDistances[k] = maxDist - startDistances[k];
       }
     });
 
-    return { laps, starts, ends, startDistances };
+    return { laps, starts, ends, startDistances, lapDistances };
   }, [localTelemetry]);
 
   const bestLapInfo = useMemo(() => {
@@ -236,6 +243,15 @@ export default function Workspace() {
     const bestStartDist = lapTimes.startDistances?.[bestLapInfo.lap] || 0;
     const bestStartTime = lapTimes.starts[bestLapInfo.lap] || 0;
 
+    const bestLapTotalDist = lapTimes.lapDistances?.[bestLapInfo.lap] || 0;
+    const currentLapTotalDist = lapTimes.lapDistances?.[currentLap] || 0;
+
+    let scaledElapsedDist = elapsedDist;
+    if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
+      scaledElapsedDist = elapsedDist * (bestLapTotalDist / currentLapTotalDist);
+      scaledElapsedDist = Math.max(0, Math.min(bestLapTotalDist, scaledElapsedDist));
+    }
+
     let low = 0;
     let high = bestLapRows.length - 1;
     let matchIdx = -1;
@@ -243,10 +259,10 @@ export default function Workspace() {
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
       const midDist = bestLapRows[mid].distance - bestStartDist;
-      if (midDist === elapsedDist) {
+      if (midDist === scaledElapsedDist) {
         matchIdx = mid;
         break;
-      } else if (midDist < elapsedDist) {
+      } else if (midDist < scaledElapsedDist) {
         low = mid + 1;
       } else {
         high = mid - 1;
@@ -269,7 +285,7 @@ export default function Workspace() {
       if (distB !== distA) {
         fraction = Math.max(
           0,
-          Math.min(1, (elapsedDist - distA) / (distB - distA)),
+          Math.min(1, (scaledElapsedDist - distA) / (distB - distA)),
         );
       }
 
@@ -1069,6 +1085,7 @@ export default function Workspace() {
           lapTimesStarts: lapTimes.starts,
           lapTimesLaps: lapTimes.laps,
           lapTimesStartDistances: lapTimes.startDistances,
+          lapTimesDistances: lapTimes.lapDistances,
           formatLapTime,
           bestLapTimeStr: formatLapTime(bestLapInfo.time),
           bestLapNum: bestLapInfo.lap,
@@ -1476,6 +1493,7 @@ export default function Workspace() {
       if (hasBestLap && tel.lap !== bestLapNum) {
         const startDistances = trackMapProps.lapTimesStartDistances || {};
         const starts = trackMapProps.lapTimesStarts || {};
+        const lapDistances = trackMapProps.lapTimesDistances || {};
         
         const curStartDist = startDistances[tel.lap] || 0;
         const curStartTime = starts[tel.lap] || 0;
@@ -1486,6 +1504,15 @@ export default function Workspace() {
         const bestStartDist = startDistances[bestLapNum] || 0;
         const bestStartTime = starts[bestLapNum] || 0;
 
+        const bestLapTotalDist = lapDistances[bestLapNum] || 0;
+        const currentLapTotalDist = lapDistances[tel.lap] || 0;
+
+        let scaledElapsedDist = elapsedDist;
+        if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
+          scaledElapsedDist = elapsedDist * (bestLapTotalDist / currentLapTotalDist);
+          scaledElapsedDist = Math.max(0, Math.min(bestLapTotalDist, scaledElapsedDist));
+        }
+
         let low = 0;
         let high = bestLapRows.length - 1;
         let matchIdx = -1;
@@ -1493,10 +1520,10 @@ export default function Workspace() {
         while (low <= high) {
           const mid = Math.floor((low + high) / 2);
           const midDist = bestLapRows[mid].distance - bestStartDist;
-          if (midDist === elapsedDist) {
+          if (midDist === scaledElapsedDist) {
             matchIdx = mid;
             break;
-          } else if (midDist < elapsedDist) {
+          } else if (midDist < scaledElapsedDist) {
             low = mid + 1;
           } else {
             high = mid - 1;
@@ -1517,7 +1544,7 @@ export default function Workspace() {
 
           let fraction = 0;
           if (distB !== distA) {
-            fraction = Math.max(0, Math.min(1, (elapsedDist - distA) / (distB - distA)));
+            fraction = Math.max(0, Math.min(1, (scaledElapsedDist - distA) / (distB - distA)));
           }
 
           const timeA = rowA.time - bestStartTime;
