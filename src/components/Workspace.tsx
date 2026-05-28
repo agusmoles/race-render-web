@@ -83,6 +83,7 @@ export default function Workspace() {
 
   // Video Ref & Playback state
   const videoRef = useRef<HTMLVideoElement>(null);
+  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -545,6 +546,22 @@ export default function Workspace() {
       videoRef.current.muted = isMuted;
     }
   }, [volume, isMuted, activeVideoIndex]);
+
+  // Prevent closing the tab during export
+  useEffect(() => {
+    if (!isExporting) return;
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "Render in progress. Are you sure you want to close this page?";
+      return e.returnValue;
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [isExporting]);
 
   // Video play controllers
   const togglePlay = () => {
@@ -1059,6 +1076,20 @@ export default function Workspace() {
         },
       );
 
+      // Copy frame to active visible preview canvas if mounted
+      if (previewCanvasRef.current) {
+        const pCtx = previewCanvasRef.current.getContext("2d");
+        if (pCtx) {
+          pCtx.drawImage(
+            canvas,
+            0,
+            0,
+            previewCanvasRef.current.width,
+            previewCanvasRef.current.height,
+          );
+        }
+      }
+
       requestAnimationFrame(renderLoop);
     };
 
@@ -1548,6 +1579,10 @@ export default function Workspace() {
         const fillW = barPercent * (barW / 2);
         
         ctx.save();
+        // Clip to the track's rounded rect so ends are rounded perfectly
+        drawRoundedRect(ctx, barX, barY, barW, barH, 1.5 * cqw);
+        ctx.clip();
+
         if (delta < 0) {
           ctx.fillStyle = "#22d3ee";
           ctx.shadowColor = "#22d3ee";
@@ -1798,30 +1833,59 @@ export default function Workspace() {
 
       {/* Exporter Progress HUD overlay modal */}
       {isExporting && (
-        <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 space-y-6">
-          <div className="p-5 bg-zinc-900 border border-zinc-800 rounded-3xl text-center space-y-4 max-w-sm shadow-2xl relative">
-            <RefreshCw
-              size={44}
-              className="animate-spin text-cyan-400 mx-auto"
-            />
-            <div>
-              <h3 className="text-sm font-black uppercase tracking-wider text-zinc-200">
-                Exporting Telemetry Overlay
-              </h3>
-              <p className="text-[10px] text-zinc-550 mt-1 uppercase font-semibold">
-                Rendering Frame-by-Frame via GPU Hardware Canvas
-              </p>
+        <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 p-6">
+          <div className="p-6 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-3xl text-center space-y-5 max-w-xl w-full shadow-2xl relative flex flex-col items-center">
+            <div className="flex items-center space-x-3">
+              <RefreshCw
+                size={24}
+                className="animate-spin text-cyan-400"
+              />
+              <div>
+                <h3 className="text-sm font-black uppercase tracking-wider text-zinc-100">
+                  Exporting Telemetry Overlay
+                </h3>
+                <p className="text-[10px] text-zinc-500 uppercase font-semibold tracking-wider mt-0.5">
+                  Rendering Frame-by-Frame via GPU Hardware Canvas
+                </p>
+              </div>
+            </div>
+
+            {/* Live Preview Canvas container */}
+            <div className="relative aspect-video w-full bg-zinc-950 rounded-2xl border border-zinc-850 overflow-hidden shadow-2xl flex items-center justify-center">
+              <canvas
+                ref={previewCanvasRef}
+                width={640}
+                height={360}
+                className="w-full h-full object-contain"
+              />
+              <div className="absolute top-3 left-3 px-2 py-1 bg-black/70 backdrop-blur-md rounded-md border border-zinc-800 flex items-center space-x-1.5 pointer-events-none">
+                <span className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" />
+                <span className="text-[8px] font-black tracking-wider uppercase text-zinc-300">
+                  Live Render Preview
+                </span>
+              </div>
             </div>
 
             {/* Progress bar */}
-            <div className="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-850">
-              <div
-                className="bg-cyan-500 h-full transition-all duration-300 shadow-[0_0_8px_#22d3ee]"
-                style={{ width: `${exportProgress}%` }}
-              />
+            <div className="w-full space-y-2">
+              <div className="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-850">
+                <div
+                  className="bg-cyan-500 h-full transition-all duration-300 shadow-[0_0_8px_#22d3ee]"
+                  style={{ width: `${exportProgress}%` }}
+                />
+              </div>
+              <div className="flex justify-between items-center text-xs font-mono font-bold text-zinc-400">
+                <span>{exportProgress}% Completed</span>
+                <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">Active GPU Render</span>
+              </div>
             </div>
-            <div className="text-xs font-mono font-bold text-zinc-400">
-              {exportProgress}% Completed
+
+            {/* Warning Section */}
+            <div className="p-3.5 bg-rose-950/20 border border-rose-900/40 rounded-2xl text-[10px] text-rose-300/90 flex items-start space-x-2 text-left w-full">
+              <span className="font-extrabold uppercase bg-rose-500 text-black px-1 rounded shrink-0">WARNING</span>
+              <span className="leading-relaxed">
+                <strong>Keep this window/tab open and active!</strong> Switching tabs, minimizing, or backgrounding the browser will freeze or terminate the GPU render process.
+              </span>
             </div>
           </div>
         </div>
@@ -1916,7 +1980,7 @@ export default function Workspace() {
                         if (modalVideoRef.current)
                           modalVideoRef.current.currentTime = t;
                       }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
                       -1.0s
                     </button>
@@ -1930,6 +1994,28 @@ export default function Workspace() {
                       className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
                       -0.1s
+                    </button>
+                    <button
+                      onClick={() => {
+                        const t = Math.max(0, modalVideoTime - 1 / 60);
+                        setModalVideoTime(t);
+                        if (modalVideoRef.current)
+                          modalVideoRef.current.currentTime = t;
+                      }}
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition"
+                    >
+                      -1 Frame
+                    </button>
+                    <button
+                      onClick={() => {
+                        const t = Math.min(videoDuration, modalVideoTime + 1 / 60);
+                        setModalVideoTime(t);
+                        if (modalVideoRef.current)
+                          modalVideoRef.current.currentTime = t;
+                      }}
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition"
+                    >
+                      +1 Frame
                     </button>
                     <button
                       onClick={() => {
@@ -1949,7 +2035,7 @@ export default function Workspace() {
                         if (modalVideoRef.current)
                           modalVideoRef.current.currentTime = t;
                       }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
                       +1.0s
                     </button>
