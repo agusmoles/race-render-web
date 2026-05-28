@@ -1,6 +1,6 @@
-# Contributing to RaceRender Web (Carbon Core)
+# Contributing to Open RaceRender Web (Carbon Core)
 
-Welcome, fellow developer, to the **RaceRender Web** codebase. We build high-performance, browser-based telemetry overlay tools. To keep the fire burning bright and the dashboard running fast, please follow these guidelines when contributing!
+Welcome, fellow developer, to the **Open RaceRender Web** codebase. We build high-performance, browser-based telemetry overlay tools. To keep the fire burning bright and the dashboard running fast, please follow these guidelines when contributing!
 
 ---
 
@@ -25,9 +25,10 @@ To keep our code clean, strong, and highly performant, all contributors must str
 Every interface modification or new feature must match our premium dashboard design. Before doing any UI work, review [DESIGN.md](file:///root/race-render-web/DESIGN.md).
 
 ### 🌟 Key Styling Directives:
+
 - **Backgrounds**: Deep, rich dark base (`bg-zinc-950`).
 - **Cards/Panels**: Carbon Glass aesthetic (`bg-zinc-900/80 backdrop-blur-md`).
-- **Accent Colors**: 
+- **Accent Colors**:
   - `rose-500` for redlines, high warnings, and speed hot zones.
   - `cyan-400` for active path tracers, current sync markers, and active vectors.
 - **Micro-animations**: Make transitions fluid. Speedometers, sliders, and buttons should react dynamically to hover and active states.
@@ -38,6 +39,7 @@ Every interface modification or new feature must match our premium dashboard des
 ## 🚀 Step-by-Step Development Process
 
 ### 1. Set Up Your Environment
+
 Ensure you have Node.js (v20+ recommended) and `pnpm` installed on your machine.
 
 ```bash
@@ -53,7 +55,9 @@ pnpm dev
 ```
 
 ### 2. Create a Feature Branch
+
 Use descriptive branch names:
+
 ```bash
 git checkout -b feature/cool-new-gauge
 # or
@@ -61,6 +65,7 @@ git checkout -b bugfix/trimmer-seek-issue
 ```
 
 ### 3. Verification & Linting
+
 Before opening a pull request, verify that the application compiles without warnings and the linter passes successfully:
 
 ```bash
@@ -72,7 +77,9 @@ pnpm build
 ```
 
 ### 4. Open a Pull Request (PR)
+
 When submitting a PR, make sure to:
+
 - Explain what problem the changes solve.
 - Include screenshots or visual walkthroughs for any UI modifications.
 - Ensure the branch is fully rebased onto `main`.
