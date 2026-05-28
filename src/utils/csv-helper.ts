@@ -7,6 +7,7 @@ export interface TelemetryRow {
   lat: number;
   lon: number;
   lap: number;
+  distance: number;
 }
 
 export interface ParsedTelemetry {
@@ -210,6 +211,7 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       lat,
       lon,
       lap,
+      distance: 0,
     });
   }
 
@@ -219,6 +221,16 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     for (const r of rows) {
       r.time = parseFloat((r.time - startTime).toFixed(3));
     }
+  }
+
+  // Calculate cumulative distance by integrating speed over time
+  let cumulativeDistance = 0;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const prevR = i > 0 ? rows[i - 1] : r;
+    const dt = r.time - prevR.time;
+    cumulativeDistance += (r.speed || 0) * dt;
+    r.distance = parseFloat(cumulativeDistance.toFixed(4));
   }
 
   // DETECT SAMPLE RATE AND AUTO-CORRECT TIME UNIT

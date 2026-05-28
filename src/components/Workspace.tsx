@@ -25,6 +25,7 @@ import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
 import TrackMap from "./gauges/TrackMap";
 import LapTimer from "./gauges/LapTimer";
+import DeltaBar from "./gauges/DeltaBar";
 
 interface WidgetLayout {
   x: number;
@@ -77,6 +78,7 @@ export default function Workspace() {
     gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
     trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
     lapTimer: { x: 3, y: 3, w: 26, h: 16, visible: true },
+    deltaBar: { x: 35, y: 3, w: 30, h: 8, visible: true },
   });
 
   // Video Ref & Playback state
@@ -115,6 +117,7 @@ export default function Workspace() {
     lat: 0,
     lon: 0,
     lap: 1,
+    distance: 0,
   });
 
   // Telemetry Sync Wizard Modal State
@@ -156,11 +159,13 @@ export default function Workspace() {
     const laps: Record<number, number> = {};
     const starts: Record<number, number> = {};
     const ends: Record<number, number> = {};
+    const startDistances: Record<number, number> = {};
 
     localTelemetry.rows.forEach((r) => {
       if (r.lap === undefined || r.lap < 1) return;
       if (starts[r.lap] === undefined || r.time < starts[r.lap]) {
         starts[r.lap] = r.time;
+        startDistances[r.lap] = r.distance || 0;
       }
       if (ends[r.lap] === undefined || r.time > ends[r.lap]) {
         ends[r.lap] = r.time;
@@ -178,7 +183,7 @@ export default function Workspace() {
       }
     });
 
-    return { laps, starts, ends };
+    return { laps, starts, ends, startDistances };
   }, [localTelemetry]);
 
   const bestLapInfo = useMemo(() => {
@@ -213,6 +218,67 @@ export default function Workspace() {
       ? { lap: 0, time: 0 }
       : { lap: bestLap, time: bestTime };
   }, [lapTimes]);
+
+  const bestLapRows = useMemo(() => {
+    if (!localTelemetry?.rows || bestLapInfo.lap === 0) return [];
+    return localTelemetry.rows.filter((r) => r.lap === bestLapInfo.lap);
+  }, [localTelemetry, bestLapInfo.lap]);
+
+  const getDeltaTime = (
+    currentLap: number,
+    elapsedTime: number,
+    elapsedDist: number,
+  ) => {
+    if (bestLapInfo.lap === 0 || bestLapRows.length === 0) return 0;
+    if (currentLap === bestLapInfo.lap) return 0;
+
+    const bestStartDist = lapTimes.startDistances?.[bestLapInfo.lap] || 0;
+    const bestStartTime = lapTimes.starts[bestLapInfo.lap] || 0;
+
+    let low = 0;
+    let high = bestLapRows.length - 1;
+    let matchIdx = -1;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const midDist = bestLapRows[mid].distance - bestStartDist;
+      if (midDist === elapsedDist) {
+        matchIdx = mid;
+        break;
+      } else if (midDist < elapsedDist) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    let bestLapTime = 0;
+    if (matchIdx !== -1) {
+      bestLapTime = bestLapRows[matchIdx].time - bestStartTime;
+    } else {
+      const idxB = Math.min(low, bestLapRows.length - 1);
+      const idxA = Math.max(0, idxB - 1);
+      const rowA = bestLapRows[idxA];
+      const rowB = bestLapRows[idxB];
+
+      const distA = rowA.distance - bestStartDist;
+      const distB = rowB.distance - bestStartDist;
+
+      let fraction = 0;
+      if (distB !== distA) {
+        fraction = Math.max(
+          0,
+          Math.min(1, (elapsedDist - distA) / (distB - distA)),
+        );
+      }
+
+      const timeA = rowA.time - bestStartTime;
+      const timeB = rowB.time - bestStartTime;
+      bestLapTime = timeA + fraction * (timeB - timeA);
+    }
+
+    return elapsedTime - bestLapTime;
+  };
 
   const formatLapTime = (secs: number) => {
     if (isNaN(secs) || secs <= 0) return "0:00.00";
@@ -406,6 +472,7 @@ export default function Workspace() {
             lat: Number(match.lat) || 0,
             lon: Number(match.lon) || 0,
             lap: Number(match.lap) || 1,
+            distance: Number((match as any).distance) || 0,
           });
         } else {
           // `low` is the first index where rows[low].time >= telemetryTime after binary search
@@ -451,6 +518,9 @@ export default function Workspace() {
                 ? 0
                 : rowA.lon + fraction * (rowB.lon - rowA.lon),
               lap: Number(rowA.lap) || 1,
+              distance: isNaN(rowA.distance + fraction * (rowB.distance - rowA.distance))
+                ? 0
+                : rowA.distance + fraction * (rowB.distance - rowA.distance),
             });
           }
         }
@@ -899,6 +969,7 @@ export default function Workspace() {
         lat: 0,
         lon: 0,
         lap: 1,
+        distance: 0,
       };
 
       // Simple interpolation loop
@@ -916,6 +987,7 @@ export default function Workspace() {
             lat: m.lat,
             lon: m.lon,
             lap: m.lap || 1,
+            distance: m.distance || 0,
           };
           break;
         } else if (rows[mid].time < tTime) low = mid + 1;
@@ -940,6 +1012,7 @@ export default function Workspace() {
             lat: rA.lat + frac * (rB.lat - rA.lat),
             lon: rA.lon + frac * (rB.lon - rA.lon),
             lap: rA.lap || 1,
+            distance: rA.distance + frac * (rB.distance - rA.distance),
           };
         }
       }
@@ -978,9 +1051,11 @@ export default function Workspace() {
           telemetryTime: tTime,
           lapTimesStarts: lapTimes.starts,
           lapTimesLaps: lapTimes.laps,
+          lapTimesStartDistances: lapTimes.startDistances,
           formatLapTime,
           bestLapTimeStr: formatLapTime(bestLapInfo.time),
           bestLapNum: bestLapInfo.lap,
+          bestLapRows,
         },
       );
 
@@ -1005,6 +1080,7 @@ export default function Workspace() {
       lat: number;
       lon: number;
       lap: number;
+      distance: number;
     },
     gHistory: { x: number; y: number }[],
     trackMapProps: any,
@@ -1352,6 +1428,143 @@ export default function Workspace() {
       ctx.restore();
     }
 
+    // DELTA BAR WIDGET DRAW
+    if (layoutConfig.deltaBar?.visible) {
+      const wX = (layoutConfig.deltaBar.x / 100) * width;
+      const wY = (layoutConfig.deltaBar.y / 100) * height;
+      const wW = (layoutConfig.deltaBar.w / 100) * width;
+      const cqw = wW / 100;
+
+      ctx.save();
+
+      const bestLapNum = trackMapProps.bestLapNum || 0;
+      const bestLapRows = trackMapProps.bestLapRows || [];
+      const hasBestLap = bestLapNum > 0 && bestLapRows.length > 0;
+      
+      let delta = 0;
+      if (hasBestLap && tel.lap !== bestLapNum) {
+        const startDistances = trackMapProps.lapTimesStartDistances || {};
+        const starts = trackMapProps.lapTimesStarts || {};
+        
+        const curStartDist = startDistances[tel.lap] || 0;
+        const curStartTime = starts[tel.lap] || 0;
+        
+        const elapsedDist = tel.distance - curStartDist;
+        const elapsedTime = (trackMapProps.telemetryTime || 0) - curStartTime;
+        
+        const bestStartDist = startDistances[bestLapNum] || 0;
+        const bestStartTime = starts[bestLapNum] || 0;
+
+        let low = 0;
+        let high = bestLapRows.length - 1;
+        let matchIdx = -1;
+
+        while (low <= high) {
+          const mid = Math.floor((low + high) / 2);
+          const midDist = bestLapRows[mid].distance - bestStartDist;
+          if (midDist === elapsedDist) {
+            matchIdx = mid;
+            break;
+          } else if (midDist < elapsedDist) {
+            low = mid + 1;
+          } else {
+            high = mid - 1;
+          }
+        }
+
+        let bestLapTime = 0;
+        if (matchIdx !== -1) {
+          bestLapTime = bestLapRows[matchIdx].time - bestStartTime;
+        } else {
+          const idxB = Math.min(low, bestLapRows.length - 1);
+          const idxA = Math.max(0, idxB - 1);
+          const rowA = bestLapRows[idxA];
+          const rowB = bestLapRows[idxB];
+
+          const distA = rowA.distance - bestStartDist;
+          const distB = rowB.distance - bestStartDist;
+
+          let fraction = 0;
+          if (distB !== distA) {
+            fraction = Math.max(0, Math.min(1, (elapsedDist - distA) / (distB - distA)));
+          }
+
+          const timeA = rowA.time - bestStartTime;
+          const timeB = rowB.time - bestStartTime;
+          bestLapTime = timeA + fraction * (timeB - timeA);
+        }
+
+        delta = elapsedTime - bestLapTime;
+      }
+
+      // Title
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#71717a";
+      ctx.font = `900 ${3 * cqw}px sans-serif`;
+      ctx.fillText("LAP DELTA", wX + wW / 2, wY + 4 * cqw);
+
+      // Value
+      let valueStr = "0.00";
+      let valColor = "#a1a1aa";
+      if (!hasBestLap) {
+        valueStr = "--.--";
+        valColor = "#71717a";
+      } else if (delta < 0) {
+        valueStr = delta.toFixed(2);
+        valColor = "#22d3ee";
+      } else if (delta > 0) {
+        valueStr = "+" + delta.toFixed(2);
+        valColor = "#f43f5e";
+      }
+
+      ctx.fillStyle = valColor;
+      ctx.font = `900 ${7 * cqw}px monospace`;
+      ctx.fillText(valueStr, wX + wW / 2, wY + 7.5 * cqw);
+
+      // Visual Bar background track
+      const barY = wY + 16 * cqw;
+      const barH = 3 * cqw;
+      const barW = wW - 10 * cqw;
+      const barX = wX + 5 * cqw;
+
+      // Draw bar track rounded rect
+      drawRoundedRect(ctx, barX, barY, barW, barH, 1.5 * cqw);
+      ctx.fillStyle = "#18181b";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(39, 39, 42, 0.6)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Center divider tick
+      ctx.fillStyle = "rgba(113, 113, 122, 0.8)";
+      ctx.fillRect(barX + barW / 2 - 0.25 * cqw, barY, 0.5 * cqw, barH);
+
+      // Draw visual delta fill
+      if (hasBestLap && delta !== 0) {
+        const clampLimit = 2.0;
+        const clampedDelta = Math.max(-clampLimit, Math.min(clampLimit, delta));
+        const barPercent = Math.abs(clampedDelta) / clampLimit;
+        const fillW = barPercent * (barW / 2);
+        
+        ctx.save();
+        if (delta < 0) {
+          ctx.fillStyle = "#22d3ee";
+          ctx.shadowColor = "#22d3ee";
+          ctx.shadowBlur = 6;
+          ctx.fillRect(barX + barW / 2 - fillW, barY, fillW, barH);
+        } else {
+          ctx.fillStyle = "#f43f5e";
+          ctx.shadowColor = "#f43f5e";
+          ctx.shadowBlur = 6;
+          ctx.fillRect(barX + barW / 2, barY, fillW, barH);
+        }
+        ctx.restore();
+      }
+
+      ctx.restore();
+    }
+
     ctx.restore();
   };
 
@@ -1392,6 +1605,20 @@ export default function Workspace() {
     const start = lapTimes.starts[currentTelemetry.lap] || 0;
     return Math.max(0, currentTelemetryTime - start);
   }, [lapTimes, currentTelemetry.lap, currentTelemetryTime]);
+
+  const currentDelta = useMemo(() => {
+    const elapsedDist =
+      currentTelemetry.distance -
+      (lapTimes.startDistances?.[currentTelemetry.lap] || 0);
+    return getDeltaTime(currentTelemetry.lap, currentLapElapsed, elapsedDist);
+  }, [
+    currentTelemetry.lap,
+    currentTelemetry.distance,
+    currentLapElapsed,
+    lapTimes,
+    bestLapRows,
+    bestLapInfo,
+  ]);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
@@ -2300,6 +2527,29 @@ export default function Workspace() {
                     previousLapTime={formatLapTime(
                       lapTimes.laps[currentTelemetry.lap - 1] || 0,
                     )}
+                  />
+                </div>
+              )}
+
+              {/* DELTA BAR WIDGET */}
+              {layoutConfig.deltaBar?.visible && (
+                <div
+                  className={`absolute transition-all duration-75 select-none @container ${
+                    isEditMode
+                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                      : ""
+                  }`}
+                  style={{
+                    left: `${layoutConfig.deltaBar.x}%`,
+                    top: `${layoutConfig.deltaBar.y}%`,
+                    width: `${layoutConfig.deltaBar.w}%`,
+                    height: "fit-content",
+                  }}
+                  onMouseDown={(e) => handleWidgetMouseDown(e, "deltaBar")}
+                >
+                  <DeltaBar
+                    delta={currentDelta}
+                    hasBestLap={bestLapInfo.lap > 0}
                   />
                 </div>
               )}
