@@ -12,6 +12,7 @@ export const metadata: Metadata = {
   creator: "Agustin Moles",
   publisher: "Agustin Moles",
   robots: "index,follow",
+  metadataBase: "https://openracerender.com/",
 };
 
 export default function RootLayout({
