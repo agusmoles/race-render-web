@@ -244,6 +244,10 @@ export default function Workspace() {
     if (bestLapInfo.lap === 0 || bestLapRows.length === 0) return 0;
     if (currentLap === bestLapInfo.lap) return 0;
 
+    const isInLap = telemetryLaps.length > 0 && currentLap === telemetryLaps[0];
+    const isOutLap = telemetryLaps.length > 1 && currentLap === telemetryLaps[telemetryLaps.length - 1];
+    if (isInLap || isOutLap) return 0;
+
     const bestStartDist = lapTimes.startDistances?.[bestLapInfo.lap] || 0;
     const bestStartTime = lapTimes.starts[bestLapInfo.lap] || 0;
 
@@ -316,10 +320,20 @@ export default function Workspace() {
   // Track map coordinates list
   const gpsPoints = useMemo(() => {
     if (!localTelemetry?.rows) return [];
-    return localTelemetry.rows.map((row) => ({
-      lat: Number(row.lat) || 0,
-      lon: Number(row.lon) || 0,
-    }));
+    const laps = new Set<number>();
+    localTelemetry.rows.forEach((r) => {
+      if (r.lap && r.lap > 0) laps.add(r.lap);
+    });
+    const sortedLaps = Array.from(laps).sort((a, b) => a - b);
+    const inLap = sortedLaps.length > 0 ? sortedLaps[0] : null;
+    const outLap = sortedLaps.length > 1 ? sortedLaps[sortedLaps.length - 1] : null;
+
+    return localTelemetry.rows
+      .filter((row) => row.lap !== inLap && row.lap !== outLap)
+      .map((row) => ({
+        lat: Number(row.lat) || 0,
+        lon: Number(row.lon) || 0,
+      }));
   }, [localTelemetry]);
 
   const seekToTelemetryTime = (targetSeconds: number) => {
@@ -1684,6 +1698,14 @@ export default function Workspace() {
       ctx.restore();
     }
 
+    ctx.save();
+    ctx.font = `${Math.round(height * 0.018)}px sans-serif`;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "top";
+    ctx.fillText("OpenRaceRender.com", width * 0.98, height * 0.03);
+    ctx.restore();
+
     ctx.restore();
   };
 
@@ -2600,6 +2622,12 @@ export default function Workspace() {
               </label>
             </div>
           )}
+
+          <span
+            className="absolute top-3 right-3 text-white/20 text-[10px] font-medium pointer-events-none select-none z-10"
+          >
+            OpenRaceRender.com
+          </span>
 
           {/* Absolute HUD Dashboard Overlays */}
           {localTelemetry && (
