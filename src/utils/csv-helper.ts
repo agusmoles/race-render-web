@@ -296,32 +296,48 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
   // Smart GPS-based Lap detection if no explicit lap channel found
   const uniqueLaps = new Set(rows.map((r) => r.lap));
   if (uniqueLaps.size <= 1 && rows.length > 200) {
-    const firstValidGps = rows.find((r) => r.lat !== 0 && r.lon !== 0);
-    if (firstValidGps) {
-      const startLat = firstValidGps.lat;
-      const startLon = firstValidGps.lon;
-      let currentLap = 1;
-      let lastCrossingIndex = 0;
-      const cooldownPoints = 500;
-      const proximityThresholdSquared = 0.0003 * 0.0003;
+    // Find the row with the maximum speed that has valid GPS
+    let maxSpeedRow = rows.find((r) => r.lat !== 0 && r.lon !== 0);
+    for (const r of rows) {
+      if (r.lat !== 0 && r.lon !== 0 && r.speed > (maxSpeedRow?.speed || 0)) {
+        maxSpeedRow = r;
+      }
+    }
 
-      for (let i = 200; i < rows.length; i++) {
-        const row = rows[i];
+    if (maxSpeedRow) {
+      const startLat = maxSpeedRow.lat;
+      const startLon = maxSpeedRow.lon;
+      let currentLap = 1;
+      
+      // Cooldown in seconds to prevent multiple lap triggers on the same straight
+      let lastCrossingTime = -999;
+      const cooldownSeconds = 20;
+      
+      // Proximity threshold ~30m (approx 0.0003 degrees depending on latitude)
+      const proximityThresholdSquared = 0.0003 * 0.0003;
+      let inZone = false;
+
+      for (const row of rows) {
+        row.lap = currentLap;
         if (row.lat === 0 || row.lon === 0) continue;
 
         const dLat = row.lat - startLat;
         const dLon = row.lon - startLon;
         const distSq = dLat * dLat + dLon * dLon;
 
-        if (
-          distSq < proximityThresholdSquared &&
-          i - lastCrossingIndex > cooldownPoints
-        ) {
-          currentLap++;
-          lastCrossingIndex = i;
+        if (distSq < proximityThresholdSquared) {
+          if (!inZone) {
+            inZone = true;
+            // Only trigger a new lap if cooldown has elapsed
+            if (row.time - lastCrossingTime > cooldownSeconds) {
+              currentLap++;
+              row.lap = currentLap; // Update current row
+              lastCrossingTime = row.time;
+            }
+          }
+        } else {
+          inZone = false;
         }
-
-        row.lap = currentLap;
       }
     }
   }
