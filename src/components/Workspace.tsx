@@ -131,15 +131,7 @@ export default function Workspace() {
   const [modalTelemetryIdx, setModalTelemetryIdx] = useState(0);
   const modalVideoRef = useRef<HTMLVideoElement>(null);
 
-  // Dual-point calibration coordinates for automatic scale computation
-  const [syncPoint1, setSyncPoint1] = useState<{
-    video: number;
-    telemetry: number;
-  } | null>(null);
-  const [syncPoint2, setSyncPoint2] = useState<{
-    video: number;
-    telemetry: number;
-  } | null>(null);
+  // Removed sync point state
 
   const telemetryMeta = useMemo(() => {
     if (!localTelemetry)
@@ -208,16 +200,10 @@ export default function Workspace() {
     let bestLap = 0;
     let bestTime = Infinity;
 
+    const lastLapKey = lapKeys[lapKeys.length - 1];
+
     lapKeys.forEach((lapNum) => {
-      if (lapKeys.length > 2) {
-        if (lapNum === lapKeys[0] || lapNum === lapKeys[lapKeys.length - 1]) {
-          return;
-        }
-      } else if (lapKeys.length === 2) {
-        if (lapNum === lapKeys[0]) {
-          return;
-        }
-      }
+      if (lapKeys.length > 1 && lapNum === lastLapKey) return;
 
       const duration = lapTimes.laps[lapNum];
       if (duration < bestTime && duration > 5) {
@@ -245,7 +231,9 @@ export default function Workspace() {
     if (currentLap === bestLapInfo.lap) return 0;
 
     const isInLap = telemetryLaps.length > 0 && currentLap === telemetryLaps[0];
-    const isOutLap = telemetryLaps.length > 1 && currentLap === telemetryLaps[telemetryLaps.length - 1];
+    const isOutLap =
+      telemetryLaps.length > 1 &&
+      currentLap === telemetryLaps[telemetryLaps.length - 1];
     if (isInLap || isOutLap) return 0;
 
     const bestStartDist = lapTimes.startDistances?.[bestLapInfo.lap] || 0;
@@ -317,25 +305,6 @@ export default function Workspace() {
     return `${mins}:${remainingSecs.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
   };
 
-  // Track map coordinates list
-  const gpsPoints = useMemo(() => {
-    if (!localTelemetry?.rows) return [];
-    const laps = new Set<number>();
-    localTelemetry.rows.forEach((r) => {
-      if (r.lap && r.lap > 0) laps.add(r.lap);
-    });
-    const sortedLaps = Array.from(laps).sort((a, b) => a - b);
-    const inLap = sortedLaps.length > 0 ? sortedLaps[0] : null;
-    const outLap = sortedLaps.length > 1 ? sortedLaps[sortedLaps.length - 1] : null;
-
-    return localTelemetry.rows
-      .filter((row) => row.lap !== inLap && row.lap !== outLap)
-      .map((row) => ({
-        lat: Number(row.lat) || 0,
-        lon: Number(row.lon) || 0,
-      }));
-  }, [localTelemetry]);
-
   const seekToTelemetryTime = (targetSeconds: number) => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
     const rows = localTelemetry.rows;
@@ -354,18 +323,94 @@ export default function Workspace() {
     if (!localTelemetry?.rows) return [];
     const lapsSet = new Set<number>();
     localTelemetry.rows.forEach((r) => {
-      if (r.lap && r.lap > 0) lapsSet.add(r.lap);
+      if (r.lap !== undefined && r.lap >= 0) lapsSet.add(r.lap);
     });
     return Array.from(lapsSet).sort((a, b) => a - b);
   }, [localTelemetry]);
 
-  // Jump wizard to first row of specific lap number
-  const handleJumpToLapStart = (lapNum: number) => {
-    if (!localTelemetry?.rows) return;
-    const targetIdx = localTelemetry.rows.findIndex((r) => r.lap === lapNum);
-    if (targetIdx !== -1) {
-      setModalTelemetryIdx(targetIdx);
+  const firstTimedLapNum = telemetryLaps.length > 1 ? telemetryLaps[1] : -1;
+
+  const firstLapStartIdx = useMemo(() => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length < 2) return -1;
+
+    if (firstTimedLapNum !== -1) {
+      const targetIdx = localTelemetry.rows.findIndex(
+        (row) => row.lap === firstTimedLapNum,
+      );
+      if (targetIdx !== -1) return targetIdx;
     }
+
+    for (let i = 1; i < localTelemetry.rows.length; i++) {
+      if (
+        localTelemetry.rows[i].segmentTime <
+        localTelemetry.rows[i - 1].segmentTime - 1
+      ) {
+        return i;
+      }
+    }
+
+    return -1;
+  }, [localTelemetry, firstTimedLapNum]);
+
+  // Track map coordinates list
+  const gpsPoints = useMemo(() => {
+    if (!localTelemetry?.rows) return [];
+
+    let filteredRows = localTelemetry.rows;
+
+    if (firstLapStartIdx > 0) {
+      filteredRows = filteredRows.slice(firstLapStartIdx);
+    } else if (telemetryLaps.length >= 2) {
+      const outLapNum = telemetryLaps[0];
+      filteredRows = filteredRows.filter((row) => row.lap !== outLapNum);
+    }
+
+    if (telemetryLaps.length >= 3) {
+      const inLapNum = telemetryLaps[telemetryLaps.length - 1];
+      filteredRows = filteredRows.filter((row) => row.lap !== inLapNum);
+    }
+
+    return filteredRows.map((row) => ({
+      lat: Number(row.lat) || 0,
+      lon: Number(row.lon) || 0,
+    }));
+  }, [localTelemetry, firstLapStartIdx, telemetryLaps]);
+
+  const firstLapStartCoord = useMemo(() => {
+    if (
+      !localTelemetry?.rows ||
+      firstLapStartIdx === -1 ||
+      !localTelemetry.rows[firstLapStartIdx]
+    ) {
+      return null;
+    }
+
+    const row = localTelemetry.rows[firstLapStartIdx];
+    if (row.lat !== 0 && row.lon !== 0) {
+      return { lat: row.lat, lon: row.lon };
+    }
+
+    return null;
+  }, [localTelemetry, firstLapStartIdx]);
+
+  const startFinishCoord = firstLapStartCoord;
+
+  const handleJumpToFirstLapStart = () => {
+    if (firstLapStartIdx !== -1) {
+      setModalTelemetryIdx(firstLapStartIdx);
+      return;
+    }
+
+    if (localTelemetry?.rows && telemetryLaps.length >= 2) {
+      const firstTimedLap = telemetryLaps[1];
+      const idx = localTelemetry.rows.findIndex((r) => r.lap === firstTimedLap);
+      if (idx !== -1) {
+        setModalTelemetryIdx(idx);
+        return;
+      }
+    }
+
+    handleJumpToLap(1);
   };
 
   // Jump wizard to specific lap index (1st, 2nd, 3rd) with fallback
@@ -675,8 +720,6 @@ export default function Workspace() {
       setModalVideoTime(0);
     }
     setModalTelemetryIdx(0);
-    setSyncPoint1(null);
-    setSyncPoint2(null);
     setIsSyncModalOpen(true);
     setIsPlaying(false);
     if (videoRef.current) videoRef.current.pause();
@@ -694,21 +737,6 @@ export default function Workspace() {
   //   offset = vid1 - tel1 / scale
   const handleApplySyncWizard = () => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
-
-    if (syncPoint1 && syncPoint2) {
-      const vDelta = syncPoint2.video - syncPoint1.video;
-      const tDelta = syncPoint2.telemetry - syncPoint1.telemetry;
-      if (Math.abs(vDelta) > 0.5) {
-        const computedScale = tDelta / vDelta;
-        const computedOffset =
-          syncPoint1.video - syncPoint1.telemetry / computedScale;
-        setSpeedScale(parseFloat(computedScale.toFixed(6)));
-        setSyncOffset(parseFloat(computedOffset.toFixed(4)));
-        if (videoRef.current) videoRef.current.currentTime = syncPoint1.video;
-        setIsSyncModalOpen(false);
-        return;
-      }
-    }
 
     const telRow =
       localTelemetry.rows[
@@ -2180,9 +2208,9 @@ export default function Workspace() {
                     <div className="grid grid-cols-2 gap-1 text-[10px] font-sans">
                       <div className="text-zinc-500">Current Lap:</div>
                       <div className="font-mono font-bold text-cyan-400 text-right uppercase">
-                        {wizardTelemetryRow.lap === 1
+                        {wizardTelemetryRow.lap === 0
                           ? "Out Lap"
-                          : `Lap ${wizardTelemetryRow.lap - 1}`}
+                          : `Lap ${wizardTelemetryRow.lap}`}
                       </div>
                       <div className="text-zinc-500">Log Timestamp:</div>
                       <div className="font-mono font-bold text-rose-400 text-right">
@@ -2259,245 +2287,116 @@ export default function Workspace() {
                       />
                     </div>
                   )}
-                  <div className="flex justify-between text-[10px] font-mono text-zinc-400">
-                    <span>Row Index:</span>
-                    <span className="font-bold text-zinc-500">
-                      {modalTelemetryIdx} / {localTelemetry.rows.length - 1}
-                    </span>
-                  </div>
 
-                  <input
-                    type="range"
-                    min={0}
-                    max={localTelemetry.rows.length - 1}
-                    step={1}
-                    value={modalTelemetryIdx}
-                    onChange={(e) =>
-                      setModalTelemetryIdx(parseInt(e.target.value) || 0)
-                    }
-                    className="w-full accent-zinc-600 h-0.5 bg-zinc-950 rounded-lg appearance-none cursor-pointer"
-                  />
-
-                  {/* Micro buttons */}
                   <div className="flex flex-wrap items-center justify-center gap-1.5">
                     <button
                       onClick={() =>
-                        setModalTelemetryIdx(
-                          Math.max(0, modalTelemetryIdx - 100),
+                        seekToTelemetryTime(
+                          Math.max(0, (wizardTelemetryRow?.time ?? 0) - 5),
                         )
-                      }
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
-                    >
-                      -100 pts
-                    </button>
-                    <button
-                      onClick={() =>
-                        setModalTelemetryIdx(Math.max(0, modalTelemetryIdx - 1))
                       }
                       className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
-                      -1 pt
+                      -5s
                     </button>
                     <button
                       onClick={() =>
-                        setModalTelemetryIdx(
+                        seekToTelemetryTime(
+                          Math.max(0, (wizardTelemetryRow?.time ?? 0) - 1),
+                        )
+                      }
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                    >
+                      -1s
+                    </button>
+                    <button
+                      onClick={() =>
+                        seekToTelemetryTime(
+                          Math.max(0, (wizardTelemetryRow?.time ?? 0) - 0.1),
+                        )
+                      }
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-rose-400 transition"
+                    >
+                      -0.1s
+                    </button>
+                    <button
+                      onClick={() =>
+                        seekToTelemetryTime(
                           Math.min(
-                            localTelemetry.rows.length - 1,
-                            modalTelemetryIdx + 1,
+                            localTelemetry.totalDuration,
+                            (wizardTelemetryRow?.time ?? 0) + 0.1,
+                          ),
+                        )
+                      }
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-rose-400 transition"
+                    >
+                      +0.1s
+                    </button>
+                    <button
+                      onClick={() =>
+                        seekToTelemetryTime(
+                          Math.min(
+                            localTelemetry.totalDuration,
+                            (wizardTelemetryRow?.time ?? 0) + 1,
                           ),
                         )
                       }
                       className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
-                      +1 pt
+                      +1s
                     </button>
                     <button
                       onClick={() =>
-                        setModalTelemetryIdx(
+                        seekToTelemetryTime(
                           Math.min(
-                            localTelemetry.rows.length - 1,
-                            modalTelemetryIdx + 100,
+                            localTelemetry.totalDuration,
+                            (wizardTelemetryRow?.time ?? 0) + 5,
                           ),
                         )
                       }
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
                     >
-                      +100 pts
+                      +5s
                     </button>
                   </div>
 
-                  {/* AUTOMATED LAP JUMP BUTTONS */}
-                  <div className="border-t border-zinc-800/80 pt-3 space-y-2">
-                    <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-black flex items-center space-x-1">
-                      <Flag size={10} />
-                      <span>Lap-Start Fast Jumps</span>
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <button
-                        onClick={() => handleJumpToLap(1)}
-                        className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-rose-400 hover:text-rose-300 font-extrabold text-[9px] py-1.5 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
-                      >
-                        <Flag size={8} />
-                        <span>1st Lap</span>
-                        <span className="text-[7px] text-zinc-500 font-mono">
-                          {telemetryLaps.length >= 2
-                            ? `Lap ${telemetryLaps[1]}`
-                            : "0%"}
-                        </span>
-                      </button>
-                      <button
-                        onClick={() => handleJumpToLap(2)}
-                        className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-rose-400 hover:text-rose-300 font-extrabold text-[9px] py-1.5 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
-                      >
-                        <Flag size={8} />
-                        <span>2nd Lap</span>
-                        <span className="text-[7px] text-zinc-500 font-mono">
-                          {telemetryLaps.length >= 3
-                            ? `Lap ${telemetryLaps[2]}`
-                            : "33%"}
-                        </span>
-                      </button>
-                      <button
-                        onClick={() => handleJumpToLap(3)}
-                        className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-rose-400 hover:text-rose-300 font-extrabold text-[9px] py-1.5 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
-                      >
-                        <Flag size={8} />
-                        <span>3rd Lap</span>
-                        <span className="text-[7px] text-zinc-500 font-mono">
-                          {telemetryLaps.length >= 4
-                            ? `Lap ${telemetryLaps[3]}`
-                            : "66%"}
-                        </span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* DUAL POINT DRIFT CALIBRATOR */}
-                  <div className="border-t border-zinc-800/80 pt-3 space-y-2">
-                    <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-black flex items-center space-x-1">
-                      <Sliders size={10} />
-                      <span>2-Point Clock Drift Correction</span>
-                    </div>
-                    <p className="text-[8px] text-zinc-600 leading-relaxed">
-                      Align a 1st event below, lock it. Then seek BOTH video +
-                      telemetry to a 2nd event and lock it. Computes exact scale
-                      to correct clock drift.
-                    </p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        onClick={() => {
-                          if (wizardTelemetryRow) {
-                            setSyncPoint1({
-                              video: modalVideoTime,
-                              telemetry: wizardTelemetryRow.time,
-                            });
-                          }
-                        }}
-                        className={`border text-[9px] py-2 rounded-lg uppercase tracking-wider font-extrabold transition cursor-pointer flex flex-col items-center justify-center space-y-0.5 ${
-                          syncPoint1
-                            ? "bg-emerald-500/10 border-emerald-500 text-emerald-400"
-                            : "bg-zinc-950 hover:bg-zinc-850 border-zinc-850 text-zinc-400"
-                        }`}
-                      >
-                        <span>📍 Lock Point A</span>
-                        {syncPoint1 ? (
-                          <span className="text-[7px] font-mono text-emerald-300">
-                            V:{Math.floor(syncPoint1.video / 60)}:
-                            {String(Math.floor(syncPoint1.video % 60)).padStart(
-                              2,
-                              "0",
-                            )}{" "}
-                            = T:{Math.floor(syncPoint1.telemetry / 60)}:
-                            {String(
-                              Math.floor(syncPoint1.telemetry % 60),
-                            ).padStart(2, "0")}
-                          </span>
-                        ) : (
-                          <span className="text-[7px] text-zinc-550">
-                            Seek to event, lock here
-                          </span>
-                        )}
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          if (wizardTelemetryRow) {
-                            setSyncPoint2({
-                              video: modalVideoTime,
-                              telemetry: wizardTelemetryRow.time,
-                            });
-                          }
-                        }}
-                        className={`border text-[9px] py-2 rounded-lg uppercase tracking-wider font-extrabold transition cursor-pointer flex flex-col items-center justify-center space-y-0.5 ${
-                          syncPoint2
-                            ? "bg-emerald-500/10 border-emerald-500 text-emerald-400"
-                            : "bg-zinc-950 hover:bg-zinc-850 border-zinc-850 text-zinc-400"
-                        }`}
-                      >
-                        <span>📍 Lock Point B</span>
-                        {syncPoint2 ? (
-                          <span className="text-[7px] font-mono text-emerald-300">
-                            V:{Math.floor(syncPoint2.video / 60)}:
-                            {String(Math.floor(syncPoint2.video % 60)).padStart(
-                              2,
-                              "0",
-                            )}{" "}
-                            = T:{Math.floor(syncPoint2.telemetry / 60)}:
-                            {String(
-                              Math.floor(syncPoint2.telemetry % 60),
-                            ).padStart(2, "0")}
-                          </span>
-                        ) : (
-                          <span className="text-[7px] text-zinc-550">
-                            Seek to 2nd event, lock here
-                          </span>
-                        )}
-                      </button>
-                    </div>
-
-                    {syncPoint1 && syncPoint2 && (
-                      <div className="bg-zinc-950 border border-zinc-850 rounded-xl p-2.5 text-[9px] font-mono space-y-1">
-                        <div className="flex items-center justify-between text-zinc-400">
-                          <span>Computed Scale:</span>
-                          <span
-                            className={`font-extrabold ${
-                              Math.abs(syncPoint2.video - syncPoint1.video) >
-                              0.5
-                                ? "text-cyan-400"
-                                : "text-rose-400"
-                            }`}
-                          >
-                            {Math.abs(syncPoint2.video - syncPoint1.video) > 0.5
-                              ? (
-                                  (syncPoint2.telemetry -
-                                    syncPoint1.telemetry) /
-                                  (syncPoint2.video - syncPoint1.video)
-                                ).toFixed(6) + "x"
-                              : "⚠ Points too close"}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between text-zinc-400">
-                          <span>Computed Offset:</span>
-                          <span className="text-cyan-400 font-extrabold">
-                            {Math.abs(syncPoint2.video - syncPoint1.video) > 0.5
-                              ? (() => {
-                                  const s =
-                                    (syncPoint2.telemetry -
-                                      syncPoint1.telemetry) /
-                                    (syncPoint2.video - syncPoint1.video);
-                                  return (
-                                    (
-                                      syncPoint1.video -
-                                      syncPoint1.telemetry / s
-                                    ).toFixed(3) + "s"
-                                  );
-                                })()
-                              : "—"}
-                          </span>
-                        </div>
+                  <div className="flex justify-center">
+                    <button
+                      onClick={handleJumpToFirstLapStart}
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-cyan-400 hover:text-cyan-300 font-extrabold text-[9px] px-6 py-2 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
+                    >
+                      <div className="flex items-center space-x-1">
+                        <Flag size={10} />
+                        <span>Go to First Lap Start Point</span>
                       </div>
-                    )}
+                      <span className="text-[7px] text-zinc-500 font-mono">
+                        Derived from Segment Time Reset
+                      </span>
+                    </button>
                   </div>
+
+                  {localTelemetry.hasDetectedLaps && (
+                    <div className="border-t border-zinc-800/80 pt-3 space-y-2">
+                      <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-black flex items-center space-x-1">
+                        <Flag size={10} />
+                        <span>Lap-Start Fast Jumps</span>
+                      </div>
+                      <div className="flex justify-center">
+                        <button
+                          onClick={handleJumpToFirstLapStart}
+                          className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-rose-400 hover:text-rose-300 font-extrabold text-[9px] px-6 py-2 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
+                        >
+                          <div className="flex items-center space-x-1">
+                            <Flag size={10} />
+                            <span>Go to First Lap Start</span>
+                          </div>
+                          <span className="text-[7px] text-zinc-500 font-mono">
+                            Based on Segment Time
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2514,6 +2413,7 @@ export default function Workspace() {
                     gpsPoints={gpsPoints}
                     currentLat={wizardTelemetryRow ? wizardTelemetryRow.lat : 0}
                     currentLon={wizardTelemetryRow ? wizardTelemetryRow.lon : 0}
+                    startFinishCoord={startFinishCoord}
                   />
                 </div>
               </div>
@@ -2524,11 +2424,7 @@ export default function Workspace() {
               <div className="text-[10px] text-zinc-450 uppercase font-semibold flex flex-wrap items-center gap-x-3 gap-y-1">
                 <div className="flex items-center space-x-1.5">
                   <Zap size={14} className="text-cyan-400 animate-bounce" />
-                  <span>
-                    {syncPoint1 && syncPoint2
-                      ? "2-Point Mode — Offset:"
-                      : "1-Point Mode — Offset:"}
-                  </span>
+                  <span>Offset:</span>
                   <span className="font-mono font-bold text-zinc-200 text-xs bg-zinc-900 border border-zinc-850 px-2 py-0.5 rounded">
                     {(modalVideoTime - (wizardTelemetryRow?.time || 0)).toFixed(
                       3,
@@ -2623,9 +2519,7 @@ export default function Workspace() {
             </div>
           )}
 
-          <span
-            className="absolute top-3 right-3 text-white/20 text-[10px] font-medium pointer-events-none select-none z-10"
-          >
+          <span className="absolute top-3 right-3 text-white/20 text-[10px] font-medium pointer-events-none select-none z-10">
             OpenRaceRender.com
           </span>
 
@@ -2715,6 +2609,7 @@ export default function Workspace() {
                     gpsPoints={gpsPoints}
                     currentLat={currentTelemetry.lat}
                     currentLon={currentTelemetry.lon}
+                    startFinishCoord={startFinishCoord}
                   />
                 </div>
               )}

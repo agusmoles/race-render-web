@@ -11,20 +11,22 @@ interface TrackMapProps {
   gpsPoints: GPSPoint[];
   currentLat: number;
   currentLon: number;
+  startFinishCoord?: GPSPoint | null;
 }
 
 export default function TrackMap({
   gpsPoints = [],
   currentLat = 0,
   currentLon = 0,
+  startFinishCoord = null,
 }: TrackMapProps) {
   const validPoints = useMemo(() => {
     return gpsPoints.filter(p => p.lat !== 0 && p.lon !== 0);
   }, [gpsPoints]);
 
-  const { pathData, currentCoords, hasGPS } = useMemo(() => {
+  const { pathData, currentCoords, hasGPS, sfCoords } = useMemo(() => {
     if (validPoints.length < 5) {
-      return { pathData: "", currentCoords: null, hasGPS: false };
+      return { pathData: "", currentCoords: null, hasGPS: false, sfCoords: null };
     }
 
     let minLat = Infinity;
@@ -43,7 +45,7 @@ export default function TrackMap({
     const lonSpan = maxLon - minLon;
 
     if (latSpan === 0 || lonSpan === 0) {
-      return { pathData: "", currentCoords: null, hasGPS: false };
+      return { pathData: "", currentCoords: null, hasGPS: false, sfCoords: null };
     }
 
     const svgWidth = 200;
@@ -78,8 +80,13 @@ export default function TrackMap({
       curCoords = getSvgCoords(validPoints[0].lat, validPoints[0].lon);
     }
 
-    return { pathData: path, currentCoords: curCoords, hasGPS: true };
-  }, [validPoints, currentLat, currentLon]);
+    let sfCoords = null;
+    if (startFinishCoord && startFinishCoord.lat !== 0 && startFinishCoord.lon !== 0) {
+      sfCoords = getSvgCoords(startFinishCoord.lat, startFinishCoord.lon);
+    }
+
+    return { pathData: path, currentCoords: curCoords, hasGPS: true, sfCoords };
+  }, [validPoints, currentLat, currentLon, startFinishCoord]);
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
@@ -102,6 +109,14 @@ export default function TrackMap({
               strokeLinecap="round"
               strokeLinejoin="round"
             />
+
+            {sfCoords && (
+              <polygon
+                points={`${sfCoords.x},${sfCoords.y - 5} ${sfCoords.x + 4},${sfCoords.y} ${sfCoords.x},${sfCoords.y + 5} ${sfCoords.x - 4},${sfCoords.y}`}
+                fill="#f43f5e"
+                className="drop-shadow-[0_0_6px_#f43f5e]"
+              />
+            )}
 
             {currentCoords && (
               <>

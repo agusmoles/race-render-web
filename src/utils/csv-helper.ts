@@ -8,6 +8,7 @@ export interface TelemetryRow {
   lon: number;
   lap: number;
   distance: number;
+  segmentTime: number;
 }
 
 export interface ParsedTelemetry {
@@ -19,6 +20,8 @@ export interface ParsedTelemetry {
   detectedSampleRate: number;
   totalDuration: number;
   timeUnitCorrected: boolean;
+  hasDetectedLaps: boolean;
+  beaconMarkers: number[];
 }
 
 interface ChannelIndices {
@@ -30,6 +33,8 @@ interface ChannelIndices {
   lat: number;
   lon: number;
   lap: number;
+  dist: number;
+  segmentTime: number;
 }
 
 function parseFloatClean(val: string): number {
@@ -117,7 +122,6 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       break;
     }
 
-    // Save key-value metadata pairs if seen
     if (parts.length === 2) {
       metadata[parts[0]] = parts[1];
     } else if (parts.length > 2 && parts[0] && parts[1]) {
@@ -175,9 +179,12 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     lat: indices.lat !== -1 ? headers[indices.lat] : "",
     lon: indices.lon !== -1 ? headers[indices.lon] : "",
     lap: indices.lap !== -1 ? headers[indices.lap] : "",
+    dist: indices.dist !== -1 ? headers[indices.dist] : "",
+    segmentTime: indices.segmentTime !== -1 ? headers[indices.segmentTime] : "",
   };
 
   const rows: TelemetryRow[] = [];
+  const rawDistValues: number[] = [];
 
   for (let i = dataStartIndex; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -201,6 +208,12 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     const lon = indices.lon !== -1 ? parseFloatClean(parts[indices.lon]) : 0;
     const lap =
       indices.lap !== -1 ? Math.round(parseFloatClean(parts[indices.lap])) : 1;
+    const segmentTime =
+      indices.segmentTime !== -1 ? parseFloatClean(parts[indices.segmentTime]) : 0;
+
+    if (indices.dist !== -1) {
+      rawDistValues.push(parseFloatClean(parts[indices.dist]));
+    }
 
     rows.push({
       time,
@@ -211,7 +224,8 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       lat,
       lon,
       lap,
-      distance: 0,
+      distance: indices.dist !== -1 ? parseFloatClean(parts[indices.dist]) : 0,
+      segmentTime,
     });
   }
 
@@ -293,53 +307,69 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
   const totalDuration =
     rows.length >= 2 ? rows[rows.length - 1].time - rows[0].time : 0;
 
-  // Smart GPS-based Lap detection if no explicit lap channel found
-  const uniqueLaps = new Set(rows.map((r) => r.lap));
-  if (uniqueLaps.size <= 1 && rows.length > 200) {
-    // Find the row with the maximum speed that has valid GPS
-    let maxSpeedRow = rows.find((r) => r.lat !== 0 && r.lon !== 0);
-    for (const r of rows) {
-      if (r.lat !== 0 && r.lon !== 0 && r.speed > (maxSpeedRow?.speed || 0)) {
-        maxSpeedRow = r;
+  const hasExplicitLaps = indices.lap !== -1;
+  const uniqueExplicitLaps = new Set(rows.map((r) => r.lap));
+  const hasUsefulLaps = hasExplicitLaps && uniqueExplicitLaps.size > 1;
+  let hasDetectedLaps = hasUsefulLaps;
+
+  let beaconMarkers: number[] = [];
+  const rawBeacons = metadata["Beacon Markers"];
+  if (rawBeacons) {
+    beaconMarkers = rawBeacons
+      .split(/\s+/)
+      .map((v) => parseFloat(v))
+      .filter((v) => !isNaN(v) && v > 0);
+  }
+
+  if (!hasUsefulLaps && rawDistValues.length === rows.length && rawDistValues.length > 100) {
+    let currentLap = 1;
+    let maxDist = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const d = rawDistValues[i];
+      if (i > 0 && maxDist > 100 && d < maxDist * 0.3) {
+        currentLap++;
+        maxDist = d;
+      } else {
+        maxDist = Math.max(maxDist, d);
       }
+      rows[i].lap = currentLap;
     }
 
-    if (maxSpeedRow) {
-      const startLat = maxSpeedRow.lat;
-      const startLon = maxSpeedRow.lon;
-      let currentLap = 1;
-      
-      // Cooldown in seconds to prevent multiple lap triggers on the same straight
-      let lastCrossingTime = -999;
-      const cooldownSeconds = 20;
-      
-      // Proximity threshold ~30m (approx 0.0003 degrees depending on latitude)
-      const proximityThresholdSquared = 0.0003 * 0.0003;
-      let inZone = false;
+    hasDetectedLaps = currentLap > 1;
+  }
 
-      for (const row of rows) {
-        row.lap = currentLap;
-        if (row.lat === 0 || row.lon === 0) continue;
+  if (!hasDetectedLaps && indices.segmentTime !== -1) {
+    let currentLap = 1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].segmentTime < rows[i-1].segmentTime - 1) {
+        currentLap++;
+      }
+      rows[i].lap = currentLap;
+    }
+    rows[0].lap = 1;
+    hasDetectedLaps = currentLap > 1;
+  }
 
-        const dLat = row.lat - startLat;
-        const dLon = row.lon - startLon;
-        const distSq = dLat * dLat + dLon * dLon;
-
-        if (distSq < proximityThresholdSquared) {
-          if (!inZone) {
-            inZone = true;
-            // Only trigger a new lap if cooldown has elapsed
-            if (row.time - lastCrossingTime > cooldownSeconds) {
-              currentLap++;
-              row.lap = currentLap; // Update current row
-              lastCrossingTime = row.time;
-            }
-          }
+  if (!hasDetectedLaps && beaconMarkers.length > 0 && rows.length > 0) {
+    for (let i = 0; i < rows.length; i++) {
+      const t = rows[i].time;
+      let lapNum = 0;
+      for (let b = 0; b < beaconMarkers.length; b++) {
+        if (t >= beaconMarkers[b]) {
+          lapNum = b + 1;
         } else {
-          inZone = false;
+          break;
         }
       }
+      rows[i].lap = lapNum;
     }
+    hasDetectedLaps = true;
+  }
+
+  if (!hasDetectedLaps) {
+    const uniqueLaps = new Set(rows.map((r) => r.lap));
+    hasDetectedLaps = uniqueLaps.size > 1;
   }
 
   return {
@@ -351,6 +381,8 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     detectedSampleRate,
     totalDuration,
     timeUnitCorrected,
+    hasDetectedLaps,
+    beaconMarkers,
   };
 }
 
@@ -364,6 +396,8 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
     lat: -1,
     lon: -1,
     lap: -1,
+    dist: -1,
+    segmentTime: -1,
   };
 
   for (let i = 0; i < headers.length; i++) {
@@ -465,6 +499,28 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
     ) {
       indices.lap = i;
     }
+    else if (
+      indices.dist === -1 &&
+      (name === "dist" ||
+        name === "distance" ||
+        name.includes("gps dist") ||
+        name.includes("gps_dist"))
+    ) {
+      indices.dist = i;
+    }
+    else if (
+      indices.segmentTime === -1 &&
+      (name === "segment time" ||
+        name === "segment_time" ||
+        name.includes("seg time") ||
+        name === "segtime" ||
+        name === "lap time" ||
+        name === "laptime" ||
+        name === "lap_time" ||
+        name === "segment")
+    ) {
+      indices.segmentTime = i;
+    }
   }
 
   // Fallbacks if not matches
@@ -488,6 +544,11 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
   if (indices.lap === -1) {
     indices.lap = headers.findIndex(
       (h) => h.toLowerCase() === "lap" || h.toLowerCase().includes("lap"),
+    );
+  }
+  if (indices.dist === -1) {
+    indices.dist = headers.findIndex(
+      (h) => h.toLowerCase() === "dist" || h.toLowerCase().includes("distance"),
     );
   }
 
