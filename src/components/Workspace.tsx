@@ -52,6 +52,7 @@ export default function Workspace() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportQuality, setExportQuality] = useState<"standard" | "high" | "ultra">("high");
   const [uploadError, setUploadError] = useState("");
 
   // Sync Parameters
@@ -891,6 +892,13 @@ export default function Workspace() {
     }
 
     // Initialize MediaRecorder with parameters optimized for hardware acceleration and stability
+    const bitrates: Record<string, number> = {
+      standard: 15_000_000,
+      high: 30_000_000,
+      ultra: 50_000_000,
+    };
+    const targetBitrate = bitrates[exportQuality] || 30_000_000;
+
     let options: MediaRecorderOptions = {};
     const preferredTypes = [
       "video/webm;codecs=h264,opus",
@@ -901,7 +909,7 @@ export default function Workspace() {
     ];
     for (const mimeType of preferredTypes) {
       if (MediaRecorder.isTypeSupported(mimeType)) {
-        options = { mimeType, videoBitsPerSecond: 15000000 }; // 15 Mbps for high quality 60fps
+        options = { mimeType, videoBitsPerSecond: targetBitrate };
         break;
       }
     }
@@ -1989,23 +1997,46 @@ export default function Workspace() {
             </div>
 
             {/* Footer */}
-            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex justify-end space-x-3 rounded-b-3xl">
-              <button
-                onClick={() => setIsExportModalOpen(false)}
-                className="px-4 py-2 border border-zinc-850 hover:bg-zinc-900 text-zinc-300 font-extrabold text-[10px] uppercase tracking-wider rounded-xl transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setIsExportModalOpen(false);
-                  handleExportVideo();
-                }}
-                className="bg-cyan-400 hover:bg-cyan-500 text-zinc-950 font-black px-6 py-2 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)] flex items-center space-x-1.5"
-              >
-                <Download size={12} />
-                <span>Start GPU Render</span>
-              </button>
+            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex justify-between items-center rounded-b-3xl">
+              <div className="flex items-center space-x-2">
+                <span className="text-[9px] text-zinc-500 uppercase font-black tracking-wider">Quality:</span>
+                <div className="flex space-x-1">
+                  {(["standard", "high", "ultra"] as const).map((q) => (
+                    <button
+                      key={q}
+                      onClick={() => setExportQuality(q)}
+                      className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition cursor-pointer border ${
+                        exportQuality === q
+                          ? "bg-cyan-400/15 border-cyan-400/50 text-cyan-400"
+                          : "bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+                      }`}
+                    >
+                      {q === "standard" ? "Standard" : q === "high" ? "High" : "Ultra"}
+                      <span className="ml-1 text-[7px] font-mono opacity-60">
+                        {q === "standard" ? "15Mb" : q === "high" ? "30Mb" : "50Mb"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex space-x-3">
+                <button
+                  onClick={() => setIsExportModalOpen(false)}
+                  className="px-4 py-2 border border-zinc-850 hover:bg-zinc-900 text-zinc-300 font-extrabold text-[10px] uppercase tracking-wider rounded-xl transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    setIsExportModalOpen(false);
+                    handleExportVideo();
+                  }}
+                  className="bg-cyan-400 hover:bg-cyan-500 text-zinc-950 font-black px-6 py-2 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)] flex items-center space-x-1.5"
+                >
+                  <Download size={12} />
+                  <span>Start GPU Render</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
