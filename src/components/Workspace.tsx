@@ -86,6 +86,7 @@ export default function Workspace() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const exportCancelRef = useRef(false);
+  const currentSessionKeyRef = useRef<string | null>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -519,6 +520,42 @@ export default function Workspace() {
       }
     }
   };
+
+  // Load sync config on files change
+  useEffect(() => {
+    if (videoFiles.length > 0 && csvFile) {
+      const vidNames = videoFiles.map((f) => f.name).join(",");
+      const key = `race_render_sync_${vidNames}_${csvFile.name}`;
+      currentSessionKeyRef.current = key;
+
+      const saved = localStorage.getItem(key);
+      if (saved) {
+        try {
+          const { syncOffset: savedOffset, speedScale: savedScale } =
+            JSON.parse(saved);
+          if (typeof savedOffset === "number") setSyncOffset(savedOffset);
+          if (typeof savedScale === "number") setSpeedScale(savedScale);
+          return;
+        } catch (e) {
+          // ignore parsing error
+        }
+      }
+      setSyncOffset(0);
+      setSpeedScale(1.0);
+    } else {
+      currentSessionKeyRef.current = null;
+    }
+  }, [videoFiles, csvFile]);
+
+  // Save sync config on change
+  useEffect(() => {
+    if (currentSessionKeyRef.current) {
+      localStorage.setItem(
+        currentSessionKeyRef.current,
+        JSON.stringify({ syncOffset, speedScale }),
+      );
+    }
+  }, [syncOffset, speedScale]);
 
   // Real-time animation loop for high-frequency telemetry gauge updates (60 FPS)
   useEffect(() => {
