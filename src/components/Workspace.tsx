@@ -84,6 +84,7 @@ export default function Workspace() {
   // Video Ref & Playback state
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
+  const exportCancelRef = useRef(false);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -800,6 +801,7 @@ export default function Workspace() {
 
     setIsExporting(true);
     setExportProgress(0);
+    exportCancelRef.current = false;
     setIsPlaying(false);
     videoRef.current.pause();
 
@@ -915,10 +917,17 @@ export default function Workspace() {
     mediaRecorder.onstop = () => {
       isRecording = false;
       exportVideos.forEach((v) => {
+        v.pause();
         if (v.parentNode) {
           document.body.removeChild(v);
         }
       });
+
+      if (exportCancelRef.current) {
+        setIsExporting(false);
+        return;
+      }
+
       const actualMime = options.mimeType || "video/webm";
       const fileExt = actualMime.includes("mp4") ? "mp4" : "webm";
       const blob = new Blob(chunks, { type: actualMime });
@@ -939,8 +948,6 @@ export default function Workspace() {
         import("fix-webm-duration")
           .then((fixWebmDuration) => {
             const durationMs = (actualEnd - actualStart) * 1000;
-            // fix-webm-duration supports Promise-style if callback is omitted.
-            // Note: default import handling for dynamic imports.
             const ysFixWebmDuration =
               fixWebmDuration.default || fixWebmDuration;
             if (typeof ysFixWebmDuration === "function") {
@@ -1001,52 +1008,53 @@ export default function Workspace() {
     let trackLonSpan = 0;
     let trackLatSpan = 0;
 
-    if (localTelemetry?.rows && localTelemetry.rows.length > 5) {
-      const validPoints = localTelemetry.rows.filter(
-        (p: any) => p.lat !== 0 && p.lon !== 0,
-      );
-      if (validPoints.length > 5) {
-        let minLat = Infinity,
-          maxLat = -Infinity,
-          minLon = Infinity,
-          maxLon = -Infinity;
-        for (const p of validPoints) {
-          if (p.lat < minLat) minLat = p.lat;
-          if (p.lat > maxLat) maxLat = p.lat;
-          if (p.lon < minLon) minLon = p.lon;
-          if (p.lon > maxLon) maxLon = p.lon;
-        }
-        trackLatSpan = maxLat - minLat;
-        trackLonSpan = maxLon - minLon;
-        if (trackLatSpan > 0 && trackLonSpan > 0) {
-          trackHasGPS = true;
-          const scaleX = (tSvgW - tPadding * 2) / trackLonSpan;
-          const scaleY = (tSvgH - tPadding * 2) / trackLatSpan;
-          trackScale = Math.min(scaleX, scaleY);
-          trackMinLon = minLon;
-          trackMaxLat = maxLat;
+    const filteredGpsPoints = gpsPoints.filter((p: { lat: number; lon: number }) => p.lat !== 0 && p.lon !== 0);
+    if (filteredGpsPoints.length > 5) {
+      let minLat = Infinity,
+        maxLat = -Infinity,
+        minLon = Infinity,
+        maxLon = -Infinity;
+      for (const p of filteredGpsPoints) {
+        if (p.lat < minLat) minLat = p.lat;
+        if (p.lat > maxLat) maxLat = p.lat;
+        if (p.lon < minLon) minLon = p.lon;
+        if (p.lon > maxLon) maxLon = p.lon;
+      }
+      trackLatSpan = maxLat - minLat;
+      trackLonSpan = maxLon - minLon;
+      if (trackLatSpan > 0 && trackLonSpan > 0) {
+        trackHasGPS = true;
+        const scaleX = (tSvgW - tPadding * 2) / trackLonSpan;
+        const scaleY = (tSvgH - tPadding * 2) / trackLatSpan;
+        trackScale = Math.min(scaleX, scaleY);
+        trackMinLon = minLon;
+        trackMaxLat = maxLat;
 
-          validPoints.forEach((p: any, idx: number) => {
-            const x =
-              tPadding +
-              (p.lon - minLon) * trackScale +
-              (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
-            const y =
-              tPadding +
-              (maxLat - p.lat) * trackScale +
-              (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
-            if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
-            else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-          });
-          trackPath += " Z";
-        }
+        filteredGpsPoints.forEach((p: { lat: number; lon: number }, idx: number) => {
+          const x =
+            tPadding +
+            (p.lon - minLon) * trackScale +
+            (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
+          const y =
+            tPadding +
+            (maxLat - p.lat) * trackScale +
+            (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
+          if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
+          else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+        });
+        trackPath += " Z";
       }
     }
 
     const cachedPath2D = trackHasGPS ? new Path2D(trackPath) : null;
 
     const renderLoop = () => {
-      if (!isRecording) return;
+      if (!isRecording || exportCancelRef.current) {
+        if (exportCancelRef.current && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+        return;
+      }
 
       const vTimeLocal = exportVideo.currentTime;
       const vTime =
@@ -1191,6 +1199,7 @@ export default function Workspace() {
           bestLapRows,
           maxSpeed: telemetryMaxSpeed,
           maxRpm: telemetryMaxRpm,
+          telemetryLaps,
         },
       );
 
@@ -1603,7 +1612,11 @@ export default function Workspace() {
       const hasBestLap = bestLapNum > 0 && bestLapRows.length > 0;
 
       let delta = 0;
-      if (hasBestLap && tel.lap !== bestLapNum) {
+      const tLaps: number[] = trackMapProps.telemetryLaps || [];
+      const isOutLap = tLaps.length > 0 && tel.lap === tLaps[0];
+      const isInLap = tLaps.length > 1 && tel.lap === tLaps[tLaps.length - 1];
+
+      if (hasBestLap && tel.lap !== bestLapNum && !isOutLap && !isInLap) {
         const startDistances = trackMapProps.lapTimesStartDistances || {};
         const starts = trackMapProps.lapTimesStarts || {};
         const lapDistances = trackMapProps.lapTimesDistances || {};
@@ -2057,6 +2070,17 @@ export default function Workspace() {
                 terminate the GPU render process.
               </span>
             </div>
+
+            <button
+              onClick={() => {
+                exportCancelRef.current = true;
+                setIsExporting(false);
+              }}
+              className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 hover:text-rose-200 font-extrabold text-xs px-8 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"
+            >
+              <X size={14} />
+              <span>Cancel Export</span>
+            </button>
           </div>
         </div>
       )}
