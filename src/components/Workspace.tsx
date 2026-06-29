@@ -143,6 +143,24 @@ export default function Workspace() {
     };
   }, [localTelemetry]);
 
+  const telemetryMaxSpeed = useMemo(() => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return 260;
+    let max = 0;
+    for (const r of localTelemetry.rows) {
+      if (r.speed > max) max = r.speed;
+    }
+    return Math.ceil(max / 10) * 10 || 260;
+  }, [localTelemetry]);
+
+  const telemetryMaxRpm = useMemo(() => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return 15000;
+    let max = 0;
+    for (const r of localTelemetry.rows) {
+      if (r.rpm > max) max = r.rpm;
+    }
+    return Math.ceil(max / 500) * 500 || 15000;
+  }, [localTelemetry]);
+
   const lapTimes = useMemo(() => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0)
       return {
@@ -1171,6 +1189,8 @@ export default function Workspace() {
           bestLapTimeStr: formatLapTime(bestLapInfo.time),
           bestLapNum: bestLapInfo.lap,
           bestLapRows,
+          maxSpeed: telemetryMaxSpeed,
+          maxRpm: telemetryMaxRpm,
         },
       );
 
@@ -1234,7 +1254,8 @@ export default function Workspace() {
       ctx.lineCap = "round";
       ctx.stroke();
 
-      const clampedPct = Math.min(1, Math.max(0, tel.speed / 260));
+      const maxSpeed = trackMapProps.maxSpeed || 260;
+      const clampedPct = Math.min(1, Math.max(0, tel.speed / maxSpeed));
       if (clampedPct > 0) {
         const endAngle = 135 + clampedPct * 270;
         ctx.beginPath();
@@ -1269,7 +1290,7 @@ export default function Workspace() {
       const cx = wX + wW / 2;
       const cy = wY + wH / 2;
       const r = Math.min(wW, wH) * 0.3;
-      const maxRpm = 15000;
+      const maxRpm = trackMapProps.maxRpm || 15000;
       const clampedPct = Math.min(1, Math.max(0, tel.rpm / maxRpm));
 
       let arcColor = "#10b981";
@@ -2542,7 +2563,7 @@ export default function Workspace() {
                   }}
                   onMouseDown={(e) => handleWidgetMouseDown(e, "speedometer")}
                 >
-                  <Speedometer speed={currentTelemetry.speed} />
+                  <Speedometer speed={currentTelemetry.speed} maxSpeed={telemetryMaxSpeed} />
                 </div>
               )}
 
@@ -2562,7 +2583,7 @@ export default function Workspace() {
                   }}
                   onMouseDown={(e) => handleWidgetMouseDown(e, "rpmGauge")}
                 >
-                  <RpmGauge rpm={currentTelemetry.rpm} />
+                  <RpmGauge rpm={currentTelemetry.rpm} maxRpm={telemetryMaxRpm} />
                 </div>
               )}
 
