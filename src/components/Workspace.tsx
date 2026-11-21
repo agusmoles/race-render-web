@@ -118,6 +118,7 @@ export default function Workspace() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [volume, setVolume] = useState<number>(1.0);
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
@@ -852,10 +853,6 @@ export default function Workspace() {
     dragWidgetRef.current = null;
   };
 
-  const nudgeSyncOffset = (deltaSec: number) => {
-    setSyncOffset((prev) => parseFloat((prev + deltaSec).toFixed(4)));
-  };
-
   const seekMainVideoGlobal = (globalTime: number) => {
     const clamped = Math.max(0, Math.min(videoDuration || globalTime, globalTime));
     setCurrentTime(clamped);
@@ -885,6 +882,15 @@ export default function Workspace() {
   };
 
   useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement === videoContainerRef.current);
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () =>
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isSyncModalOpen || isExportModalOpen || isExporting) return;
       const target = e.target as HTMLElement | null;
@@ -900,7 +906,9 @@ export default function Workspace() {
         }
       }
 
-      if (e.code === "Space" && videoUrls.length > 0 && videoRef.current) {
+      if (videoUrls.length === 0 || !videoRef.current) return;
+
+      if (e.code === "Space") {
         e.preventDefault();
         if (videoRef.current.paused) {
           videoRef.current
@@ -914,22 +922,41 @@ export default function Workspace() {
         return;
       }
 
-      if (!localTelemetry) return;
-
-      if (e.code === "BracketLeft") {
-        e.preventDefault();
-        const delta = e.shiftKey ? -1.0 : -0.1;
-        setSyncOffset((prev) => parseFloat((prev + delta).toFixed(4)));
-      } else if (e.code === "BracketRight") {
-        e.preventDefault();
-        const delta = e.shiftKey ? 1.0 : 0.1;
-        setSyncOffset((prev) => parseFloat((prev + delta).toFixed(4)));
+      let seekDelta: number | null = null;
+      if (e.key === "ArrowLeft") {
+        seekDelta = e.shiftKey ? -10 : -3;
+      } else if (e.key === "ArrowRight") {
+        seekDelta = e.shiftKey ? 10 : 3;
       } else if (e.key === ",") {
-        e.preventDefault();
-        setSyncOffset((prev) => parseFloat((prev - 1 / 60).toFixed(4)));
+        seekDelta = -1 / 60;
       } else if (e.key === ".") {
-        e.preventDefault();
-        setSyncOffset((prev) => parseFloat((prev + 1 / 60).toFixed(4)));
+        seekDelta = 1 / 60;
+      }
+
+      if (seekDelta === null) return;
+
+      e.preventDefault();
+      const currentGlobal =
+        videoDurations.slice(0, activeVideoIndex).reduce((a, b) => a + b, 0) +
+        videoRef.current.currentTime;
+      const clamped = Math.max(
+        0,
+        Math.min(videoDuration || currentGlobal + seekDelta, currentGlobal + seekDelta),
+      );
+      setCurrentTime(clamped);
+
+      const { index, localTime } = resolveVideoClipPosition(
+        clamped,
+        videoDurations,
+      );
+      if (index !== activeVideoIndex) {
+        pendingMainSeekRef.current = {
+          time: localTime,
+          autoPlay: !videoRef.current.paused,
+        };
+        setActiveVideoIndex(index);
+      } else {
+        videoRef.current.currentTime = localTime;
       }
     };
 
@@ -937,7 +964,9 @@ export default function Workspace() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     videoUrls.length,
-    localTelemetry,
+    videoDurations,
+    videoDuration,
+    activeVideoIndex,
     isSyncModalOpen,
     isExportModalOpen,
     isExporting,
@@ -1920,7 +1949,7 @@ export default function Workspace() {
       ctx.textBaseline = "top";
       ctx.fillStyle = "#71717a";
       ctx.font = `900 ${3 * cqw}px sans-serif`;
-      ctx.fillText("LAP DELTA", wX + wW / 2, wY + 4 * cqw);
+      ctx.fillText("LAP DELTA VS BEST", wX + wW / 2, wY + 4 * cqw);
 
       // Value
       let valueStr = "0.00";
@@ -2738,225 +2767,236 @@ export default function Workspace() {
         </div>
       )}
 
-      {/* LEFT COLUMN: 60% Width - POV Video and Overlays */}
       <div className="lg:col-span-8 flex flex-col space-y-4">
-        {/* Main Video Overlay container */}
         <div
           ref={videoContainerRef}
-          className="relative bg-zinc-950 rounded-3xl border border-zinc-800/80 shadow-2xl overflow-hidden aspect-video w-full"
-          onMouseMove={handleOverlayMouseMove}
-          onMouseUp={handleOverlayMouseUp}
-          onMouseLeave={handleOverlayMouseUp}
+          className={
+            isFullscreen
+              ? "relative bg-black overflow-hidden w-screen h-screen flex items-center justify-center"
+              : "relative bg-zinc-950 rounded-3xl border border-zinc-800/80 shadow-2xl overflow-hidden aspect-video w-full flex items-center justify-center"
+          }
         >
-          {videoUrls.length > 0 ? (
-            <video
-              ref={videoRef}
-              src={videoUrls[activeVideoIndex]}
-              className="w-full h-full object-cover rounded-3xl"
-              onLoadedMetadata={() => {
-                if (videoRef.current && pendingMainSeekRef.current !== null) {
-                  const pending = pendingMainSeekRef.current;
-                  pendingMainSeekRef.current = null;
-                  videoRef.current.currentTime = pending.time;
-                  if (pending.autoPlay) {
-                    videoRef.current
-                      .play()
-                      .catch((err) => console.error("Error playing video:", err));
+          <div
+            className={
+              isFullscreen
+                ? "relative aspect-video overflow-hidden"
+                : "relative w-full h-full overflow-hidden"
+            }
+            style={
+              isFullscreen
+                ? { width: "min(100vw, calc(100vh * 16 / 9))" }
+                : undefined
+            }
+            onMouseMove={handleOverlayMouseMove}
+            onMouseUp={handleOverlayMouseUp}
+            onMouseLeave={handleOverlayMouseUp}
+          >
+            {videoUrls.length > 0 ? (
+              <video
+                ref={videoRef}
+                src={videoUrls[activeVideoIndex]}
+                className={
+                  isFullscreen
+                    ? "w-full h-full object-cover"
+                    : "w-full h-full object-cover rounded-3xl"
+                }
+                onLoadedMetadata={() => {
+                  if (videoRef.current && pendingMainSeekRef.current !== null) {
+                    const pending = pendingMainSeekRef.current;
+                    pendingMainSeekRef.current = null;
+                    videoRef.current.currentTime = pending.time;
+                    if (pending.autoPlay) {
+                      videoRef.current
+                        .play()
+                        .catch((err) => console.error("Error playing video:", err));
+                    }
                   }
-                }
-              }}
-              onEnded={() => {
-                if (activeVideoIndex < videoUrls.length - 1) {
-                  pendingMainSeekRef.current = { time: 0, autoPlay: isPlaying };
-                  setActiveVideoIndex(activeVideoIndex + 1);
-                } else {
-                  setIsPlaying(false);
-                }
-              }}
-              onClick={togglePlay}
-            />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full text-zinc-500 p-8 text-center space-y-4">
-              <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-full text-zinc-400 drop-shadow-[0_0_15px_rgba(24,24,27,0.8)]">
-                <Upload size={36} className="animate-bounce" />
+                }}
+                onEnded={() => {
+                  if (activeVideoIndex < videoUrls.length - 1) {
+                    pendingMainSeekRef.current = { time: 0, autoPlay: isPlaying };
+                    setActiveVideoIndex(activeVideoIndex + 1);
+                  } else {
+                    setIsPlaying(false);
+                  }
+                }}
+                onClick={togglePlay}
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full text-zinc-500 p-8 text-center space-y-4">
+                <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-full text-zinc-400 drop-shadow-[0_0_15px_rgba(24,24,27,0.8)]">
+                  <Upload size={36} className="animate-bounce" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-zinc-200">
+                    Load POV Video(s)
+                  </h3>
+                  <p className="text-xs text-zinc-400 max-w-xs mt-1">
+                    GoPro POV videos not loaded! Select local videos to overlay
+                    beautiful telemetry.
+                  </p>
+                </div>
+                <label className="flex items-center space-x-2 bg-cyan-400 hover:bg-cyan-555 text-zinc-950 font-bold px-4 py-2 rounded-xl cursor-pointer text-xs transition">
+                  <Upload size={14} />
+                  <span>Select Local Video</span>
+                  <input
+                    type="file"
+                    multiple
+                    accept="video/*"
+                    onChange={handleVideoChange}
+                    className="hidden"
+                  />
+                </label>
               </div>
-              <div>
-                <h3 className="text-lg font-bold text-zinc-200">
-                  Load POV Video(s)
-                </h3>
-                <p className="text-xs text-zinc-400 max-w-xs mt-1">
-                  GoPro POV videos not loaded! Select local videos to overlay
-                  beautiful telemetry.
-                </p>
+            )}
+
+            <span className="absolute top-3 right-3 text-white/20 text-[10px] font-medium pointer-events-none select-none z-10">
+              OpenRaceRender.com
+            </span>
+
+            {localTelemetry && (
+              <div className="absolute inset-0 pointer-events-none">
+                {layoutConfig.speedometer?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.speedometer.x}%`,
+                      top: `${layoutConfig.speedometer.y}%`,
+                      width: `${layoutConfig.speedometer.w}%`,
+                      height: `${layoutConfig.speedometer.h}%`,
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "speedometer")}
+                  >
+                    <Speedometer speed={currentTelemetry.speed} maxSpeed={telemetryMaxSpeed} />
+                  </div>
+                )}
+
+                {layoutConfig.rpmGauge?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.rpmGauge.x}%`,
+                      top: `${layoutConfig.rpmGauge.y}%`,
+                      width: `${layoutConfig.rpmGauge.w}%`,
+                      height: `${layoutConfig.rpmGauge.h}%`,
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "rpmGauge")}
+                  >
+                    <RpmGauge rpm={currentTelemetry.rpm} maxRpm={telemetryMaxRpm} />
+                  </div>
+                )}
+
+                {layoutConfig.gForceRadar?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none @container ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.gForceRadar.x}%`,
+                      top: `${layoutConfig.gForceRadar.y}%`,
+                      width: `${layoutConfig.gForceRadar.w}%`,
+                      height: `${layoutConfig.gForceRadar.h}%`,
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "gForceRadar")}
+                  >
+                    <GForceRadar
+                      latAcc={currentTelemetry.latAcc}
+                      lonAcc={currentTelemetry.lonAcc}
+                    />
+                  </div>
+                )}
+
+                {layoutConfig.trackMap?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.trackMap.x}%`,
+                      top: `${layoutConfig.trackMap.y}%`,
+                      width: `${layoutConfig.trackMap.w}%`,
+                      height: `${layoutConfig.trackMap.h}%`,
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "trackMap")}
+                  >
+                    <TrackMap
+                      gpsPoints={gpsPoints}
+                      currentLat={currentTelemetry.lat}
+                      currentLon={currentTelemetry.lon}
+                      startFinishCoord={startFinishCoord}
+                    />
+                  </div>
+                )}
+
+                {layoutConfig.lapTimer?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none @container ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.lapTimer.x}%`,
+                      top: `${layoutConfig.lapTimer.y}%`,
+                      width: `${layoutConfig.lapTimer.w}%`,
+                      height: "fit-content",
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "lapTimer")}
+                  >
+                    <LapTimer
+                      currentLap={currentTelemetry.lap}
+                      currentLapTime={formatLapTime(currentLapElapsed)}
+                      bestLapTime={formatLapTime(bestLapInfo.time)}
+                      bestLapNum={bestLapInfo.lap}
+                      previousLapTime={formatLapTime(
+                        lapTimes.laps[currentTelemetry.lap - 1] || 0,
+                      )}
+                    />
+                  </div>
+                )}
+
+                {layoutConfig.deltaBar?.visible && (
+                  <div
+                    className={`absolute transition-all duration-75 select-none @container ${
+                      isEditMode
+                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
+                        : ""
+                    }`}
+                    style={{
+                      left: `${layoutConfig.deltaBar.x}%`,
+                      top: `${layoutConfig.deltaBar.y}%`,
+                      width: `${layoutConfig.deltaBar.w}%`,
+                      height: "fit-content",
+                    }}
+                    onMouseDown={(e) => handleWidgetMouseDown(e, "deltaBar")}
+                  >
+                    <DeltaBar
+                      delta={currentDelta}
+                      hasBestLap={bestLapInfo.lap > 0}
+                    />
+                  </div>
+                )}
               </div>
-              <label className="flex items-center space-x-2 bg-cyan-400 hover:bg-cyan-555 text-zinc-950 font-bold px-4 py-2 rounded-xl cursor-pointer text-xs transition">
-                <Upload size={14} />
-                <span>Select Local Video</span>
-                <input
-                  type="file"
-                  multiple
-                  accept="video/*"
-                  onChange={handleVideoChange}
-                  className="hidden"
-                />
-              </label>
-            </div>
-          )}
+            )}
 
-          <span className="absolute top-3 right-3 text-white/20 text-[10px] font-medium pointer-events-none select-none z-10">
-            OpenRaceRender.com
-          </span>
-
-          {/* Absolute HUD Dashboard Overlays */}
-          {localTelemetry && (
-            <div className="absolute inset-0 pointer-events-none">
-              {/* SPEEDOMETER WIDGET */}
-              {layoutConfig.speedometer?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.speedometer.x}%`,
-                    top: `${layoutConfig.speedometer.y}%`,
-                    width: `${layoutConfig.speedometer.w}%`,
-                    height: `${layoutConfig.speedometer.h}%`,
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "speedometer")}
-                >
-                  <Speedometer speed={currentTelemetry.speed} maxSpeed={telemetryMaxSpeed} />
-                </div>
-              )}
-
-              {/* RPM WIDGET */}
-              {layoutConfig.rpmGauge?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.rpmGauge.x}%`,
-                    top: `${layoutConfig.rpmGauge.y}%`,
-                    width: `${layoutConfig.rpmGauge.w}%`,
-                    height: `${layoutConfig.rpmGauge.h}%`,
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "rpmGauge")}
-                >
-                  <RpmGauge rpm={currentTelemetry.rpm} maxRpm={telemetryMaxRpm} />
-                </div>
-              )}
-
-              {/* G-FORCE WIDGET */}
-              {layoutConfig.gForceRadar?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.gForceRadar.x}%`,
-                    top: `${layoutConfig.gForceRadar.y}%`,
-                    width: `${layoutConfig.gForceRadar.w}%`,
-                    height: `${layoutConfig.gForceRadar.h}%`,
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "gForceRadar")}
-                >
-                  <GForceRadar
-                    latAcc={currentTelemetry.latAcc}
-                    lonAcc={currentTelemetry.lonAcc}
-                  />
-                </div>
-              )}
-
-              {/* GPS TRACK MAP WIDGET */}
-              {layoutConfig.trackMap?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.trackMap.x}%`,
-                    top: `${layoutConfig.trackMap.y}%`,
-                    width: `${layoutConfig.trackMap.w}%`,
-                    height: `${layoutConfig.trackMap.h}%`,
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "trackMap")}
-                >
-                  <TrackMap
-                    gpsPoints={gpsPoints}
-                    currentLat={currentTelemetry.lat}
-                    currentLon={currentTelemetry.lon}
-                    startFinishCoord={startFinishCoord}
-                  />
-                </div>
-              )}
-
-              {/* LAP TIMER WIDGET */}
-              {layoutConfig.lapTimer?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none @container ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.lapTimer.x}%`,
-                    top: `${layoutConfig.lapTimer.y}%`,
-                    width: `${layoutConfig.lapTimer.w}%`,
-                    height: "fit-content",
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "lapTimer")}
-                >
-                  <LapTimer
-                    currentLap={currentTelemetry.lap}
-                    currentLapTime={formatLapTime(currentLapElapsed)}
-                    bestLapTime={formatLapTime(bestLapInfo.time)}
-                    bestLapNum={bestLapInfo.lap}
-                    previousLapTime={formatLapTime(
-                      lapTimes.laps[currentTelemetry.lap - 1] || 0,
-                    )}
-                  />
-                </div>
-              )}
-
-              {/* DELTA BAR WIDGET */}
-              {layoutConfig.deltaBar?.visible && (
-                <div
-                  className={`absolute transition-all duration-75 select-none @container ${
-                    isEditMode
-                      ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                      : ""
-                  }`}
-                  style={{
-                    left: `${layoutConfig.deltaBar.x}%`,
-                    top: `${layoutConfig.deltaBar.y}%`,
-                    width: `${layoutConfig.deltaBar.w}%`,
-                    height: "fit-content",
-                  }}
-                  onMouseDown={(e) => handleWidgetMouseDown(e, "deltaBar")}
-                >
-                  <DeltaBar
-                    delta={currentDelta}
-                    hasBestLap={bestLapInfo.lap > 0}
-                  />
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Quick HUD indicator */}
-          {isEditMode && (
-            <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-cyan-500 text-zinc-950 font-extrabold text-[10px] tracking-widest px-3 py-1 rounded-full uppercase z-10 border border-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.5)]">
-              Layout HUD Editor Active - Drag widgets to position
-            </div>
-          )}
+            {isEditMode && (
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-cyan-500 text-zinc-950 font-extrabold text-[10px] tracking-widest px-3 py-1 rounded-full uppercase z-10 border border-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.5)]">
+                Layout HUD Editor Active - Drag widgets to position
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Video Scrubber & Control Bar */}
@@ -3064,176 +3104,108 @@ export default function Workspace() {
             </button>
           </div>
 
+          {videoUrls.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[10px] text-zinc-400 border-t border-zinc-800/80 pt-3">
+              <span className="inline-flex items-center space-x-1">
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  Space
+                </kbd>
+                <span>Play/Pause</span>
+              </span>
+              <span className="inline-flex items-center space-x-1">
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  ←
+                </kbd>
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  →
+                </kbd>
+                <span>±3s</span>
+              </span>
+              <span className="inline-flex items-center space-x-1">
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  Shift
+                </kbd>
+                <span className="text-zinc-500">+</span>
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  ←
+                </kbd>
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  →
+                </kbd>
+                <span>±10s</span>
+              </span>
+              <span className="inline-flex items-center space-x-1">
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-black leading-none text-center">
+                  ,
+                </kbd>
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-cyan-500/40 text-cyan-300 font-mono text-xs font-black leading-none text-center">
+                  .
+                </kbd>
+                <span>±1 Frame</span>
+              </span>
+            </div>
+          )}
+
           {localTelemetry && (
-            <div className="flex flex-col space-y-3 border-t border-zinc-800 pt-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-col space-y-0.5">
-                  <div className="flex items-center space-x-2">
-                    <Sliders size={14} className="text-cyan-400" />
-                    <span className="text-[10px] text-zinc-400 uppercase tracking-wider font-bold">
-                      Telemetry Sync Controls
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800 pt-3">
+              <div className="flex items-center">
+                {autoSyncState.phase === "running" && (
+                  <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-[10px] font-bold uppercase tracking-wider">
+                    <RefreshCw size={11} className="animate-spin" />
+                    <span>Scanning GoPro telemetry...</span>
+                  </div>
+                )}
+                {autoSyncState.phase === "matched" && autoSyncState.result && (
+                  <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold uppercase tracking-wider">
+                    <Sparkles size={11} />
+                    <span>
+                      Auto-synced via {formatSyncMethodLabel(autoSyncState.result.method)} (
+                      {Math.round(autoSyncState.result.confidence * 100)}%)
                     </span>
                   </div>
-                  <div className="text-[9px] text-zinc-500 uppercase tracking-wider">
-                    Space Play/Pause · [ ] ±0.1s · Shift+[ ] ±1s · , . ±1 Frame
+                )}
+                {autoSyncState.phase === "low-confidence" && autoSyncState.result && (
+                  <div className="flex items-center space-x-2 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase tracking-wider">
+                    <span>
+                      Low-confidence ({Math.round(autoSyncState.result.confidence * 100)}%,{" "}
+                      {autoSyncState.result.syncOffset.toFixed(2)}s)
+                    </span>
+                    <button
+                      onClick={() => {
+                        if (!autoSyncState.result) return;
+                        setSyncOffset(autoSyncState.result.syncOffset);
+                        setSpeedScale(autoSyncState.result.speedScale);
+                        setAutoSyncState({
+                          phase: "matched",
+                          result: autoSyncState.result,
+                        });
+                      }}
+                      className="bg-amber-400 hover:bg-amber-300 text-zinc-950 font-black px-2 py-0.5 rounded text-[9px] uppercase cursor-pointer transition"
+                    >
+                      Apply
+                    </button>
                   </div>
-                </div>
-
-                {autoSyncState.phase !== "idle" && (
-                  <div className="flex items-center">
-                    {autoSyncState.phase === "running" && (
-                      <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-[10px] font-bold uppercase tracking-wider">
-                        <RefreshCw size={11} className="animate-spin" />
-                        <span>Scanning GoPro telemetry...</span>
-                      </div>
-                    )}
-                    {autoSyncState.phase === "matched" && autoSyncState.result && (
-                      <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold uppercase tracking-wider">
-                        <Sparkles size={11} />
-                        <span>
-                          Auto-synced via {formatSyncMethodLabel(autoSyncState.result.method)} (
-                          {Math.round(autoSyncState.result.confidence * 100)}%)
-                        </span>
-                      </div>
-                    )}
-                    {autoSyncState.phase === "low-confidence" && autoSyncState.result && (
-                      <div className="flex items-center space-x-2 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase tracking-wider">
-                        <span>
-                          Low-confidence ({Math.round(autoSyncState.result.confidence * 100)}%,{" "}
-                          {autoSyncState.result.syncOffset.toFixed(2)}s)
-                        </span>
-                        <button
-                          onClick={() => {
-                            if (!autoSyncState.result) return;
-                            setSyncOffset(autoSyncState.result.syncOffset);
-                            setSpeedScale(autoSyncState.result.speedScale);
-                            setAutoSyncState({
-                              phase: "matched",
-                              result: autoSyncState.result,
-                            });
-                          }}
-                          className="bg-amber-400 hover:bg-amber-300 text-zinc-950 font-black px-2 py-0.5 rounded text-[9px] uppercase cursor-pointer transition"
-                        >
-                          Apply
-                        </button>
-                      </div>
-                    )}
-                    {autoSyncState.phase === "unavailable" && (
-                      <div className="px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-500 text-[10px] font-semibold">
-                        {autoSyncState.result?.reason ||
-                          "No GoPro telemetry track — use Sync Wizard or nudges"}
-                      </div>
-                    )}
+                )}
+                {autoSyncState.phase === "unavailable" && (
+                  <div className="px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-500 text-[10px] font-semibold">
+                    {autoSyncState.result?.reason ||
+                      "No GoPro telemetry track — adjust manually in Sync Wizard."}
                   </div>
+                )}
+                {autoSyncState.phase === "idle" && (
+                  <span className="text-[10px] text-zinc-500 font-semibold">
+                    Auto-sync didn&apos;t match? Adjust manually in Sync Wizard.
+                  </span>
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() =>
-                      void runAutoSync(videoFiles, videoDurations, localTelemetry)
-                    }
-                    disabled={
-                      videoFiles.length === 0 || autoSyncState.phase === "running"
-                    }
-                    className={`flex items-center space-x-1.5 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition border ${
-                      videoFiles.length > 0 && autoSyncState.phase !== "running"
-                        ? "bg-zinc-950 hover:bg-zinc-800 border-cyan-500/40 text-cyan-400 cursor-pointer"
-                        : "bg-zinc-950 border-zinc-800 text-zinc-600 cursor-not-allowed"
-                    }`}
-                  >
-                    <Sparkles size={12} />
-                    <span>Auto-Sync</span>
-                  </button>
-
-                  <button
-                    onClick={handleOpenSyncWizard}
-                    className="flex items-center space-x-1.5 bg-cyan-500 hover:bg-cyan-600 text-zinc-950 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_12px_rgba(34,211,238,0.2)]"
-                  >
-                    <Sliders size={12} />
-                    <span>Open Sync Wizard</span>
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="flex items-center space-x-1 bg-zinc-950 border border-zinc-800 rounded-xl p-1">
-                    <button
-                      onClick={() => nudgeSyncOffset(-1.0)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      -1s
-                    </button>
-                    <button
-                      onClick={() => nudgeSyncOffset(-0.1)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      -0.1s
-                    </button>
-                    <button
-                      onClick={() => nudgeSyncOffset(-1 / 60)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-cyan-400 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      -1f
-                    </button>
-                    <div className="flex items-center space-x-1 px-1">
-                      <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
-                        Offset:
-                      </span>
-                      <input
-                        type="number"
-                        step={0.01}
-                        value={syncOffset}
-                        onChange={(e) =>
-                          setSyncOffset(parseFloat(e.target.value) || 0.0)
-                        }
-                        className="w-20 bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-0.5 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
-                      />
-                      <span className="text-[9px] text-zinc-500 uppercase font-bold">
-                        s
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => nudgeSyncOffset(1 / 60)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-cyan-400 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      +1f
-                    </button>
-                    <button
-                      onClick={() => nudgeSyncOffset(0.1)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      +0.1s
-                    </button>
-                    <button
-                      onClick={() => nudgeSyncOffset(1.0)}
-                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
-                    >
-                      +1s
-                    </button>
-                  </div>
-
-                  <div className="flex items-center space-x-1.5">
-                    <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
-                      Scale:
-                    </span>
-                    <input
-                      type="number"
-                      step={0.001}
-                      min={0.5}
-                      max={2.0}
-                      value={speedScale}
-                      onChange={(e) =>
-                        setSpeedScale(parseFloat(e.target.value) || 1.0)
-                      }
-                      className="w-20 bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
-                    />
-                    <span className="text-[9px] text-zinc-500 uppercase font-bold">
-                      x
-                    </span>
-                  </div>
-                </div>
-              </div>
+              <button
+                onClick={handleOpenSyncWizard}
+                className="flex items-center space-x-1.5 bg-cyan-500 hover:bg-cyan-600 text-zinc-950 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_12px_rgba(34,211,238,0.2)] ml-auto"
+              >
+                <Sliders size={12} />
+                <span>Open Sync Wizard</span>
+              </button>
             </div>
           )}
         </div>

@@ -469,7 +469,7 @@ export function drawCanvasHUD(
     ctx.textBaseline = "top";
     ctx.fillStyle = "#71717a";
     ctx.font = `900 ${3 * cqw}px sans-serif`;
-    ctx.fillText("LAP DELTA", wX + wW / 2, wY + 4 * cqw);
+    ctx.fillText("LAP DELTA VS BEST", wX + wW / 2, wY + 4 * cqw);
 
     let valueStr = "0.00";
     let valColor = "#a1a1aa";

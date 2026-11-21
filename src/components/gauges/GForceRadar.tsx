@@ -35,13 +35,13 @@ export default function GForceRadar({ latAcc = 0, lonAcc = 0 }: GForceRadarProps
   const currentCoords = getCoordinates(latAcc, lonAcc);
 
   return (
-    <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
-      <div className="flex justify-center space-x-3 text-[9px] font-mono text-white/70 mb-1">
+    <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none @container">
+      <div className="flex justify-center space-x-[8cqw] text-[6.5cqw] font-mono text-white/70 mb-[2cqw] whitespace-nowrap">
         <div>LAT: <span className="font-bold text-white/90">{latAcc.toFixed(2)}G</span></div>
         <div>LON: <span className="font-bold text-white/90">{lonAcc.toFixed(2)}G</span></div>
       </div>
 
-      <div className="relative w-36 h-36">
+      <div className="relative flex-1 min-h-0 w-full flex items-center justify-center">
         <svg className="w-full h-full" viewBox="0 0 200 200">
           <circle
             cx={center}

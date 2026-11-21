@@ -44,7 +44,7 @@ export default function DeltaBar({ delta = 0, hasBestLap = false }: DeltaBarProp
     <div className="flex flex-col justify-center h-fit w-full select-none font-sans">
       <div className="text-center">
         <span className="text-[3cqw] font-black text-zinc-500 uppercase tracking-widest">
-          LAP DELTA
+          LAP DELTA VS BEST
         </span>
       </div>
       

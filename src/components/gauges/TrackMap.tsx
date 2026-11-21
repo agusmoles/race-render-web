@@ -90,9 +90,9 @@ export default function TrackMap({
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
-      <div className="relative w-full h-full flex items-center justify-center">
+      <div className="relative w-full h-full min-h-0 flex items-center justify-center">
         {hasGPS ? (
-          <svg className="w-full h-full max-w-52 max-h-52" viewBox="0 0 200 200">
+          <svg className="w-full h-full max-h-full" viewBox="0 0 200 200">
             <path
               d={pathData}
               fill="none"
