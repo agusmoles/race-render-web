@@ -18,8 +18,10 @@ import {
   Maximize,
   Volume2,
   VolumeX,
+  Sparkles,
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
+import { autoSyncWithGpmf, AutoSyncResult } from "@/utils/gpmf-sync";
 import Speedometer from "./gauges/Speedometer";
 import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
@@ -33,6 +35,31 @@ interface WidgetLayout {
   w: number;
   h: number;
   visible: boolean;
+}
+
+function resolveVideoClipPosition(globalTime: number, durations: number[]) {
+  if (durations.length === 0) {
+    return { index: 0, localTime: Math.max(0, globalTime) };
+  }
+  let t = 0;
+  for (let i = 0; i < durations.length; i++) {
+    const end = t + durations[i];
+    if (globalTime <= end || i === durations.length - 1) {
+      return {
+        index: i,
+        localTime: Math.max(0, Math.min(durations[i], globalTime - t)),
+      };
+    }
+    t = end;
+  }
+  return { index: 0, localTime: 0 };
+}
+
+function formatSyncMethodLabel(method: AutoSyncResult["method"]): string {
+  if (method === "gopro-gps-speed") return "GoPro GPS";
+  if (method === "gopro-gyro") return "GoPro Gyro";
+  if (method === "gopro-accl") return "GoPro Accel";
+  return "GoPro Telemetry";
 }
 
 export default function Workspace() {
@@ -131,10 +158,25 @@ export default function Workspace() {
   const [exportActiveVideoIndex, setExportActiveVideoIndex] = useState(0);
   const exportPreviewVideoRef = useRef<HTMLVideoElement>(null);
   const [modalVideoTime, setModalVideoTime] = useState(0);
+  const [modalActiveVideoIndex, setModalActiveVideoIndex] = useState(0);
   const [modalTelemetryIdx, setModalTelemetryIdx] = useState(0);
   const modalVideoRef = useRef<HTMLVideoElement>(null);
-
-  // Removed sync point state
+  const [autoSyncState, setAutoSyncState] = useState<{
+    phase: "idle" | "running" | "matched" | "low-confidence" | "unavailable";
+    result: AutoSyncResult | null;
+  }>({ phase: "idle", result: null });
+  const autoSyncRunIdRef = useRef(0);
+  const latestVideoRef = useRef<{ files: File[]; durations: number[] }>({
+    files: [],
+    durations: [],
+  });
+  const latestCsvRef = useRef<{ file: File; telemetry: ParsedTelemetry } | null>(
+    null,
+  );
+  const pendingMainSeekRef = useRef<{ time: number; autoPlay: boolean } | null>(
+    null,
+  );
+  const pendingModalSeekRef = useRef<number | null>(null);
 
   const telemetryMeta = useMemo(() => {
     if (!localTelemetry)
@@ -373,6 +415,15 @@ export default function Workspace() {
     return -1;
   }, [localTelemetry, firstTimedLapNum]);
 
+  const firstLaunchIdx = useMemo(() => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return 0;
+    const idx = localTelemetry.rows.findIndex(
+      (row) => row.speed > 5 || row.rpm > 2000,
+    );
+    if (idx !== -1) return idx;
+    return firstLapStartIdx !== -1 ? firstLapStartIdx : 0;
+  }, [localTelemetry, firstLapStartIdx]);
+
   // Track map coordinates list
   const gpsPoints = useMemo(() => {
     if (!localTelemetry?.rows) return [];
@@ -416,53 +467,79 @@ export default function Workspace() {
 
   const startFinishCoord = firstLapStartCoord;
 
-  const handleJumpToFirstLapStart = () => {
-    if (firstLapStartIdx !== -1) {
-      setModalTelemetryIdx(firstLapStartIdx);
-      return;
+  const handleJumpToLapNumber = (lapNum: number) => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
+    const targetIdx = localTelemetry.rows.findIndex((r) => r.lap === lapNum);
+    if (targetIdx !== -1) {
+      setModalTelemetryIdx(targetIdx);
     }
-
-    if (localTelemetry?.rows && telemetryLaps.length >= 2) {
-      const firstTimedLap = telemetryLaps[1];
-      const idx = localTelemetry.rows.findIndex((r) => r.lap === firstTimedLap);
-      if (idx !== -1) {
-        setModalTelemetryIdx(idx);
-        return;
-      }
-    }
-
-    handleJumpToLap(1);
   };
 
-  // Jump wizard to specific lap index (1st, 2nd, 3rd) with fallback
-  // Note: CSV Lap 1 is the "in" lap, so:
-  // - 1st Lap Start (timed) jumps to CSV Lap 2
-  // - 2nd Lap Start jumps to CSV Lap 3
-  // - 3rd Lap Start jumps to CSV Lap 4
-  const handleJumpToLap = (lapIndex: number) => {
-    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
+  const runAutoSync = async (
+    files: File[],
+    durations: number[],
+    telemetry: ParsedTelemetry,
+  ) => {
+    if (files.length === 0 || telemetry.rows.length < 10) return;
+    const runId = ++autoSyncRunIdRef.current;
+    setAutoSyncState({ phase: "running", result: null });
 
-    // Map lapIndex: 1 -> telemetryLaps[1] (CSV Lap 2), 2 -> telemetryLaps[2] (CSV Lap 3), etc.
-    if (telemetryLaps.length > lapIndex) {
-      const targetLapNum = telemetryLaps[lapIndex];
-      const targetIdx = localTelemetry.rows.findIndex(
-        (r) => r.lap === targetLapNum,
-      );
-      if (targetIdx !== -1) {
-        setModalTelemetryIdx(targetIdx);
+    try {
+      const res = await autoSyncWithGpmf(files, durations, telemetry.rows);
+      if (runId !== autoSyncRunIdRef.current) return;
+
+      if (res.status === "matched") {
+        setSyncOffset(res.syncOffset);
+        setSpeedScale(res.speedScale);
+        setAutoSyncState({ phase: "matched", result: res });
+      } else if (res.status === "low-confidence") {
+        setAutoSyncState({ phase: "low-confidence", result: res });
+      } else {
+        setAutoSyncState({ phase: "unavailable", result: res });
+      }
+    } catch {
+      if (runId !== autoSyncRunIdRef.current) return;
+      setAutoSyncState({
+        phase: "unavailable",
+        result: {
+          status: "no-signal",
+          syncOffset: 0,
+          speedScale: 1.0,
+          confidence: 0,
+          method: null,
+          reason: "Could not inspect video telemetry track",
+        },
+      });
+    }
+  };
+
+  const initializeSessionSync = (
+    files: File[],
+    durations: number[],
+    csv: File,
+    telemetry: ParsedTelemetry,
+  ) => {
+    const vidNames = files.map((f) => f.name).join(",");
+    const key = `race_render_sync_${vidNames}_${csv.name}`;
+    currentSessionKeyRef.current = key;
+
+    const saved = localStorage.getItem(key);
+    if (saved) {
+      try {
+        const { syncOffset: savedOffset, speedScale: savedScale } =
+          JSON.parse(saved);
+        if (typeof savedOffset === "number") setSyncOffset(savedOffset);
+        if (typeof savedScale === "number") setSpeedScale(savedScale);
+        setAutoSyncState({ phase: "idle", result: null });
         return;
+      } catch {
+        // ignore malformed saved sync config
       }
     }
 
-    // Proportional fallback if specific lap doesn't exist
-    const totalRows = localTelemetry.rows.length;
-    if (lapIndex === 1) {
-      setModalTelemetryIdx(0);
-    } else if (lapIndex === 2) {
-      setModalTelemetryIdx(Math.floor(totalRows * 0.33));
-    } else if (lapIndex === 3) {
-      setModalTelemetryIdx(Math.floor(totalRows * 0.66));
-    }
+    setSyncOffset(0);
+    setSpeedScale(1.0);
+    void runAutoSync(files, durations, telemetry);
   };
 
   const handleVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -472,7 +549,14 @@ export default function Workspace() {
       const files = Array.from(e.target.files).sort((a, b) =>
         a.name.localeCompare(b.name),
       );
+      autoSyncRunIdRef.current++;
+      currentSessionKeyRef.current = null;
+      latestVideoRef.current = { files, durations: [] };
+
       setVideoFiles(files);
+      setVideoDurations([]);
+      setVideoDuration(0);
+      setAutoSyncState({ phase: "idle", result: null });
       const urls = files.map((f) => URL.createObjectURL(f));
       setVideoUrls(urls);
       setActiveVideoIndex(0);
@@ -492,9 +576,21 @@ export default function Workspace() {
             }),
         ),
       );
+      if (latestVideoRef.current.files !== files) return;
+
+      latestVideoRef.current = { files, durations };
       setVideoDurations(durations);
       const total = durations.reduce((a, b) => a + b, 0);
       setVideoDuration(total);
+
+      if (latestCsvRef.current) {
+        initializeSessionSync(
+          files,
+          durations,
+          latestCsvRef.current.file,
+          latestCsvRef.current.telemetry,
+        );
+      }
     }
   };
 
@@ -502,15 +598,26 @@ export default function Workspace() {
   const handleCSVChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      autoSyncRunIdRef.current++;
+      currentSessionKeyRef.current = null;
+      latestCsvRef.current = null;
+
       setCsvFile(file);
       setIsProcessing(true);
       setUploadError("");
+      setAutoSyncState({ phase: "idle", result: null });
 
       try {
         const csvText = await file.text();
         const parsed = parseTelemetryCSV(csvText);
+        latestCsvRef.current = { file, telemetry: parsed };
         setLocalTelemetry(parsed);
         setChannelMapping(parsed.channelMapping);
+
+        const { files, durations } = latestVideoRef.current;
+        if (files.length > 0 && durations.length === files.length) {
+          initializeSessionSync(files, durations, file, parsed);
+        }
       } catch (err) {
         const error = err as Error;
         console.error(error);
@@ -521,35 +628,11 @@ export default function Workspace() {
     }
   };
 
-  // Load sync config on files change
-  useEffect(() => {
-    if (videoFiles.length > 0 && csvFile) {
-      const vidNames = videoFiles.map((f) => f.name).join(",");
-      const key = `race_render_sync_${vidNames}_${csvFile.name}`;
-      currentSessionKeyRef.current = key;
-
-      const saved = localStorage.getItem(key);
-      if (saved) {
-        try {
-          const { syncOffset: savedOffset, speedScale: savedScale } =
-            JSON.parse(saved);
-          if (typeof savedOffset === "number") setSyncOffset(savedOffset);
-          if (typeof savedScale === "number") setSpeedScale(savedScale);
-          return;
-        } catch (e) {
-          // ignore parsing error
-        }
-      }
-      setSyncOffset(0);
-      setSpeedScale(1.0);
-    } else {
-      currentSessionKeyRef.current = null;
-    }
-  }, [videoFiles, csvFile]);
-
   // Save sync config on change
   useEffect(() => {
-    if (currentSessionKeyRef.current) {
+    if (!currentSessionKeyRef.current) return;
+    const hasExisting = localStorage.getItem(currentSessionKeyRef.current) !== null;
+    if (syncOffset !== 0 || speedScale !== 1.0 || hasExisting) {
       localStorage.setItem(
         currentSessionKeyRef.current,
         JSON.stringify({ syncOffset, speedScale }),
@@ -769,14 +852,118 @@ export default function Workspace() {
     dragWidgetRef.current = null;
   };
 
+  const nudgeSyncOffset = (deltaSec: number) => {
+    setSyncOffset((prev) => parseFloat((prev + deltaSec).toFixed(4)));
+  };
+
+  const seekMainVideoGlobal = (globalTime: number) => {
+    const clamped = Math.max(0, Math.min(videoDuration || globalTime, globalTime));
+    setCurrentTime(clamped);
+    if (videoUrls.length === 0) return;
+
+    const { index, localTime } = resolveVideoClipPosition(clamped, videoDurations);
+    if (index !== activeVideoIndex) {
+      pendingMainSeekRef.current = { time: localTime, autoPlay: isPlaying };
+      setActiveVideoIndex(index);
+    } else if (videoRef.current) {
+      videoRef.current.currentTime = localTime;
+    }
+  };
+
+  const seekModalVideo = (globalTime: number) => {
+    const clamped = Math.max(0, Math.min(videoDuration || globalTime, globalTime));
+    setModalVideoTime(clamped);
+    if (videoUrls.length === 0) return;
+
+    const { index, localTime } = resolveVideoClipPosition(clamped, videoDurations);
+    if (index !== modalActiveVideoIndex) {
+      pendingModalSeekRef.current = localTime;
+      setModalActiveVideoIndex(index);
+    } else if (modalVideoRef.current) {
+      modalVideoRef.current.currentTime = localTime;
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (isSyncModalOpen || isExportModalOpen || isExporting) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          target.isContentEditable
+        ) {
+          return;
+        }
+      }
+
+      if (e.code === "Space" && videoUrls.length > 0 && videoRef.current) {
+        e.preventDefault();
+        if (videoRef.current.paused) {
+          videoRef.current
+            .play()
+            .then(() => setIsPlaying(true))
+            .catch((err) => console.error("Error playing video:", err));
+        } else {
+          videoRef.current.pause();
+          setIsPlaying(false);
+        }
+        return;
+      }
+
+      if (!localTelemetry) return;
+
+      if (e.code === "BracketLeft") {
+        e.preventDefault();
+        const delta = e.shiftKey ? -1.0 : -0.1;
+        setSyncOffset((prev) => parseFloat((prev + delta).toFixed(4)));
+      } else if (e.code === "BracketRight") {
+        e.preventDefault();
+        const delta = e.shiftKey ? 1.0 : 0.1;
+        setSyncOffset((prev) => parseFloat((prev + delta).toFixed(4)));
+      } else if (e.key === ",") {
+        e.preventDefault();
+        setSyncOffset((prev) => parseFloat((prev - 1 / 60).toFixed(4)));
+      } else if (e.key === ".") {
+        e.preventDefault();
+        setSyncOffset((prev) => parseFloat((prev + 1 / 60).toFixed(4)));
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    videoUrls.length,
+    localTelemetry,
+    isSyncModalOpen,
+    isExportModalOpen,
+    isExporting,
+  ]);
+
   // Telemetry Sync Wizard open trigger
   const handleOpenSyncWizard = () => {
-    if (videoRef.current) {
-      setModalVideoTime(videoRef.current.currentTime);
+    const localVideoTime = videoRef.current ? videoRef.current.currentTime : 0;
+    const globalVideoTime =
+      videoDurations.slice(0, activeVideoIndex).reduce((a, b) => a + b, 0) +
+      localVideoTime;
+
+    setModalActiveVideoIndex(activeVideoIndex);
+    setModalVideoTime(globalVideoTime);
+    pendingModalSeekRef.current = localVideoTime;
+
+    if (localTelemetry?.rows && localTelemetry.rows.length > 0) {
+      if (syncOffset !== 0 || speedScale !== 1.0) {
+        seekToTelemetryTime(Math.max(0, (globalVideoTime - syncOffset) * speedScale));
+      } else {
+        setModalTelemetryIdx(firstLaunchIdx);
+      }
     } else {
-      setModalVideoTime(0);
+      setModalTelemetryIdx(0);
     }
-    setModalTelemetryIdx(0);
+
     setIsSyncModalOpen(true);
     setIsPlaying(false);
     if (videoRef.current) videoRef.current.pause();
@@ -785,13 +972,7 @@ export default function Workspace() {
   // Lock and apply sync wizard values
   //
   // The sync model is: telemetryTime = (videoTime - offset) * scale
-  // For 1-point sync: offset = videoTime - telemetryTime, scale stays unchanged.
-  // For 2-point sync: solve two equations to get both offset and scale that
-  //   satisfy both (video1, tel1) and (video2, tel2) simultaneously.
-  //
-  // 2-point math (from the two equations):
-  //   tel1 = (vid1 - offset) * scale  →  scale = (tel2 - tel1) / (vid2 - vid1)
-  //   offset = vid1 - tel1 / scale
+  // For 1-point sync: offset = videoTime - telemetryTime / scale, scale stays unchanged.
   const handleApplySyncWizard = () => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
 
@@ -799,9 +980,10 @@ export default function Workspace() {
       localTelemetry.rows[
         Math.min(modalTelemetryIdx, localTelemetry.rows.length - 1)
       ];
-    const computedOffset = modalVideoTime - telRow.time;
+    const safeScale = speedScale > 0 ? speedScale : 1.0;
+    const computedOffset = modalVideoTime - telRow.time / safeScale;
     setSyncOffset(parseFloat(computedOffset.toFixed(4)));
-    if (videoRef.current) videoRef.current.currentTime = modalVideoTime;
+    seekMainVideoGlobal(modalVideoTime);
     setIsSyncModalOpen(false);
   };
 
@@ -2188,20 +2370,41 @@ export default function Workspace() {
                   <span>1. Align Video Position</span>
                 </h4>
 
-                {/* Micro video player */}
                 <div className="aspect-video bg-black rounded-2xl overflow-hidden border border-zinc-800 flex items-center justify-center relative">
                   {videoUrls.length > 0 ? (
-                    <video
-                      ref={modalVideoRef}
-                      src={videoUrls[0]}
-                      className="w-full h-full object-cover"
-                      controls={false}
-                      onTimeUpdate={() => {
-                        if (modalVideoRef.current) {
-                          setModalVideoTime(modalVideoRef.current.currentTime);
-                        }
-                      }}
-                    />
+                    <>
+                      <video
+                        ref={modalVideoRef}
+                        src={videoUrls[modalActiveVideoIndex]}
+                        className="w-full h-full object-cover"
+                        controls={false}
+                        onLoadedMetadata={() => {
+                          if (
+                            modalVideoRef.current &&
+                            pendingModalSeekRef.current !== null
+                          ) {
+                            modalVideoRef.current.currentTime =
+                              pendingModalSeekRef.current;
+                            pendingModalSeekRef.current = null;
+                          }
+                        }}
+                        onTimeUpdate={() => {
+                          if (modalVideoRef.current) {
+                            const localTime = modalVideoRef.current.currentTime;
+                            const globalTime =
+                              videoDurations
+                                .slice(0, modalActiveVideoIndex)
+                                .reduce((a, b) => a + b, 0) + localTime;
+                            setModalVideoTime(globalTime);
+                          }
+                        }}
+                      />
+                      {videoUrls.length > 1 && (
+                        <span className="absolute top-2 left-2 px-2 py-0.5 bg-black/75 border border-zinc-800 rounded text-[9px] font-mono font-bold text-cyan-400">
+                          Clip {modalActiveVideoIndex + 1} / {videoUrls.length}
+                        </span>
+                      )}
+                    </>
                   ) : (
                     <span className="text-[10px] text-zinc-650 uppercase font-bold">
                       POV Video Not Loaded
@@ -2209,7 +2412,6 @@ export default function Workspace() {
                   )}
                 </div>
 
-                {/* Precision Video Scrubbing Controls */}
                 <div className="space-y-3">
                   <div className="flex justify-between text-[10px] font-mono text-zinc-400">
                     <span>Video Time:</span>
@@ -2224,83 +2426,44 @@ export default function Workspace() {
                     max={videoDuration || 100}
                     step={0.01}
                     value={modalVideoTime}
-                    onChange={(e) => {
-                      const t = parseFloat(e.target.value);
-                      setModalVideoTime(t);
-                      if (modalVideoRef.current)
-                        modalVideoRef.current.currentTime = t;
-                    }}
+                    onChange={(e) => seekModalVideo(parseFloat(e.target.value))}
                     className="w-full accent-cyan-400 h-1 bg-zinc-950 rounded-lg appearance-none cursor-pointer"
                   />
 
-                  {/* Micro adjustment buttons */}
                   <div className="flex flex-wrap items-center justify-center gap-1.5">
                     <button
-                      onClick={() => {
-                        const t = Math.max(0, modalVideoTime - 1.0);
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      onClick={() => seekModalVideo(modalVideoTime - 1.0)}
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition cursor-pointer"
                     >
                       -1.0s
                     </button>
                     <button
-                      onClick={() => {
-                        const t = Math.max(0, modalVideoTime - 0.1);
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      onClick={() => seekModalVideo(modalVideoTime - 0.1)}
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition cursor-pointer"
                     >
                       -0.1s
                     </button>
                     <button
-                      onClick={() => {
-                        const t = Math.max(0, modalVideoTime - 1 / 60);
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition"
+                      onClick={() => seekModalVideo(modalVideoTime - 1 / 60)}
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition cursor-pointer"
                     >
                       -1 Frame
                     </button>
                     <button
-                      onClick={() => {
-                        const t = Math.min(
-                          videoDuration,
-                          modalVideoTime + 1 / 60,
-                        );
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition"
+                      onClick={() => seekModalVideo(modalVideoTime + 1 / 60)}
+                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-850 text-[9px] px-1.5 py-1 rounded font-bold uppercase text-cyan-400 transition cursor-pointer"
                     >
                       +1 Frame
                     </button>
                     <button
-                      onClick={() => {
-                        const t = Math.min(videoDuration, modalVideoTime + 0.1);
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      onClick={() => seekModalVideo(modalVideoTime + 0.1)}
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition cursor-pointer"
                     >
                       +0.1s
                     </button>
                     <button
-                      onClick={() => {
-                        const t = Math.min(videoDuration, modalVideoTime + 1.0);
-                        setModalVideoTime(t);
-                        if (modalVideoRef.current)
-                          modalVideoRef.current.currentTime = t;
-                      }}
-                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition"
+                      onClick={() => seekModalVideo(modalVideoTime + 1.0)}
+                      className="bg-zinc-950 hover:bg-zinc-855 border border-zinc-855 text-[9px] px-1.5 py-1 rounded font-bold uppercase transition cursor-pointer"
                     >
                       +1.0s
                     </button>
@@ -2473,54 +2636,51 @@ export default function Workspace() {
                     </button>
                   </div>
 
-                  <div className="flex justify-center">
-                    <button
-                      onClick={handleJumpToFirstLapStart}
-                      className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-cyan-400 hover:text-cyan-300 font-extrabold text-[9px] px-6 py-2 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
-                    >
-                      <div className="flex items-center space-x-1">
-                        <Flag size={10} />
-                        <span>Go to First Lap Start Point</span>
-                      </div>
-                      <span className="text-[7px] text-zinc-500 font-mono">
-                        Derived from Segment Time Reset
-                      </span>
-                    </button>
-                  </div>
-
-                  {localTelemetry.hasDetectedLaps && (
-                    <div className="border-t border-zinc-800/80 pt-3 space-y-2">
+                  <div className="border-t border-zinc-800/80 pt-3 space-y-2.5">
+                    <div className="flex items-center justify-between">
                       <div className="text-[9px] text-zinc-500 uppercase tracking-widest font-black flex items-center space-x-1">
                         <Flag size={10} />
-                        <span>Lap-Start Fast Jumps</span>
+                        <span>Quick Jumps</span>
                       </div>
-                      <div className="flex justify-center">
-                        <button
-                          onClick={handleJumpToFirstLapStart}
-                          className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-rose-400 hover:text-rose-300 font-extrabold text-[9px] px-6 py-2 rounded-lg uppercase transition flex flex-col items-center justify-center cursor-pointer space-y-0.5"
-                        >
-                          <div className="flex items-center space-x-1">
-                            <Flag size={10} />
-                            <span>Go to First Lap Start</span>
-                          </div>
-                          <span className="text-[7px] text-zinc-500 font-mono">
-                            Based on Segment Time
-                          </span>
-                        </button>
-                      </div>
+                      <button
+                        onClick={() => setModalTelemetryIdx(firstLaunchIdx)}
+                        className="bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-cyan-400 hover:text-cyan-300 font-extrabold text-[9px] px-2.5 py-1 rounded-lg uppercase transition flex items-center space-x-1 cursor-pointer"
+                      >
+                        <Zap size={10} />
+                        <span>First Launch</span>
+                      </button>
                     </div>
-                  )}
+
+                    {telemetryLaps.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5">
+                        {telemetryLaps.map((lapNum) => {
+                          const isCurrent = wizardTelemetryRow?.lap === lapNum;
+                          return (
+                            <button
+                              key={lapNum}
+                              onClick={() => handleJumpToLapNumber(lapNum)}
+                              className={`px-2 py-1 rounded-md text-[9px] font-mono font-bold uppercase border transition cursor-pointer ${
+                                isCurrent
+                                  ? "bg-rose-500/20 border-rose-500/60 text-rose-400"
+                                  : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700"
+                              }`}
+                            >
+                              {lapNum === 0 ? "Out" : `L${lapNum}`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              {/* Right Panel (Col 4): Track Map Visual Positioner */}
               <div className="md:col-span-4 p-6 flex flex-col space-y-4">
                 <h4 className="text-xs font-extrabold uppercase text-cyan-400 tracking-wider flex items-center space-x-1.5">
                   <MapPin size={12} />
                   <span>3. Visual Track Coordinate</span>
                 </h4>
 
-                {/* Circuit Map driven by Wizard coordinates */}
                 <div className="w-full aspect-square md:aspect-auto md:grow min-h-50 border border-zinc-800 rounded-2xl overflow-hidden bg-zinc-950/60 p-2">
                   <TrackMap
                     gpsPoints={gpsPoints}
@@ -2532,16 +2692,17 @@ export default function Workspace() {
               </div>
             </div>
 
-            {/* Bottom summary and apply */}
             <div className="bg-zinc-950/60 px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between space-y-3 md:space-y-0 border-t border-zinc-800">
               <div className="text-[10px] text-zinc-450 uppercase font-semibold flex flex-wrap items-center gap-x-3 gap-y-1">
                 <div className="flex items-center space-x-1.5">
                   <Zap size={14} className="text-cyan-400 animate-bounce" />
                   <span>Offset:</span>
                   <span className="font-mono font-bold text-zinc-200 text-xs bg-zinc-900 border border-zinc-850 px-2 py-0.5 rounded">
-                    {(modalVideoTime - (wizardTelemetryRow?.time || 0)).toFixed(
-                      3,
-                    )}
+                    {(
+                      modalVideoTime -
+                      (wizardTelemetryRow?.time || 0) /
+                        (speedScale > 0 ? speedScale : 1.0)
+                    ).toFixed(3)}
                     s
                   </span>
                 </div>
@@ -2592,12 +2753,22 @@ export default function Workspace() {
               ref={videoRef}
               src={videoUrls[activeVideoIndex]}
               className="w-full h-full object-cover rounded-3xl"
+              onLoadedMetadata={() => {
+                if (videoRef.current && pendingMainSeekRef.current !== null) {
+                  const pending = pendingMainSeekRef.current;
+                  pendingMainSeekRef.current = null;
+                  videoRef.current.currentTime = pending.time;
+                  if (pending.autoPlay) {
+                    videoRef.current
+                      .play()
+                      .catch((err) => console.error("Error playing video:", err));
+                  }
+                }
+              }}
               onEnded={() => {
                 if (activeVideoIndex < videoUrls.length - 1) {
+                  pendingMainSeekRef.current = { time: 0, autoPlay: isPlaying };
                   setActiveVideoIndex(activeVideoIndex + 1);
-                  setTimeout(() => {
-                    if (videoRef.current && isPlaying) videoRef.current.play();
-                  }, 0);
                 } else {
                   setIsPlaying(false);
                 }
@@ -2858,35 +3029,7 @@ export default function Workspace() {
                 step={0.05}
                 value={currentTime}
                 disabled={videoUrls.length === 0}
-                onChange={(e) => {
-                  const val = parseFloat(e.target.value);
-                  setCurrentTime(val);
-
-                  let t = 0;
-                  let idx = 0;
-                  for (let i = 0; i < videoDurations.length; i++) {
-                    if (
-                      val <= t + videoDurations[i] ||
-                      i === videoDurations.length - 1
-                    ) {
-                      idx = i;
-                      break;
-                    }
-                    t += videoDurations[i];
-                  }
-
-                  if (idx !== activeVideoIndex) {
-                    setActiveVideoIndex(idx);
-                    if (videoRef.current) {
-                      videoRef.current.src = videoUrls[idx];
-                      videoRef.current.currentTime = val - t;
-                      if (isPlaying) videoRef.current.play();
-                    }
-                  } else {
-                    if (videoRef.current)
-                      videoRef.current.currentTime = val - t;
-                  }
-                }}
+                onChange={(e) => seekMainVideoGlobal(parseFloat(e.target.value))}
                 className="w-full accent-cyan-400 h-1 bg-zinc-950 rounded-lg appearance-none cursor-pointer disabled:cursor-not-allowed z-10"
               />
             </div>
@@ -2921,67 +3064,174 @@ export default function Workspace() {
             </button>
           </div>
 
-          {/* Sync timeline helper details */}
           {localTelemetry && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-zinc-800 pt-3">
-              <div className="flex flex-col space-y-1">
-                <div className="flex items-center space-x-2">
-                  <Sliders size={14} className="text-cyan-400" />
-                  <span className="text-[10px] text-zinc-400 uppercase tracking-wider font-bold">
-                    Telemetry Sync Controls
-                  </span>
+            <div className="flex flex-col space-y-3 border-t border-zinc-800 pt-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-col space-y-0.5">
+                  <div className="flex items-center space-x-2">
+                    <Sliders size={14} className="text-cyan-400" />
+                    <span className="text-[10px] text-zinc-400 uppercase tracking-wider font-bold">
+                      Telemetry Sync Controls
+                    </span>
+                  </div>
+                  <div className="text-[9px] text-zinc-500 uppercase tracking-wider">
+                    Space Play/Pause · [ ] ±0.1s · Shift+[ ] ±1s · , . ±1 Frame
+                  </div>
                 </div>
-                <div className="text-[8px] text-zinc-555 uppercase tracking-wider">
-                  Adjust offset and scaling to resolve clock drift
-                </div>
+
+                {autoSyncState.phase !== "idle" && (
+                  <div className="flex items-center">
+                    {autoSyncState.phase === "running" && (
+                      <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-[10px] font-bold uppercase tracking-wider">
+                        <RefreshCw size={11} className="animate-spin" />
+                        <span>Scanning GoPro telemetry...</span>
+                      </div>
+                    )}
+                    {autoSyncState.phase === "matched" && autoSyncState.result && (
+                      <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-bold uppercase tracking-wider">
+                        <Sparkles size={11} />
+                        <span>
+                          Auto-synced via {formatSyncMethodLabel(autoSyncState.result.method)} (
+                          {Math.round(autoSyncState.result.confidence * 100)}%)
+                        </span>
+                      </div>
+                    )}
+                    {autoSyncState.phase === "low-confidence" && autoSyncState.result && (
+                      <div className="flex items-center space-x-2 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[10px] font-bold uppercase tracking-wider">
+                        <span>
+                          Low-confidence ({Math.round(autoSyncState.result.confidence * 100)}%,{" "}
+                          {autoSyncState.result.syncOffset.toFixed(2)}s)
+                        </span>
+                        <button
+                          onClick={() => {
+                            if (!autoSyncState.result) return;
+                            setSyncOffset(autoSyncState.result.syncOffset);
+                            setSpeedScale(autoSyncState.result.speedScale);
+                            setAutoSyncState({
+                              phase: "matched",
+                              result: autoSyncState.result,
+                            });
+                          }}
+                          className="bg-amber-400 hover:bg-amber-300 text-zinc-950 font-black px-2 py-0.5 rounded text-[9px] uppercase cursor-pointer transition"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    )}
+                    {autoSyncState.phase === "unavailable" && (
+                      <div className="px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-500 text-[10px] font-semibold">
+                        {autoSyncState.result?.reason ||
+                          "No GoPro telemetry track — use Sync Wizard or nudges"}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-              <div className="flex flex-wrap items-center justify-end gap-3">
-                <button
-                  onClick={handleOpenSyncWizard}
-                  className="flex items-center space-x-1.5 bg-cyan-500 hover:bg-cyan-600 text-zinc-950 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_12px_rgba(34,211,238,0.2)]"
-                >
-                  <Sliders size={12} />
-                  <span>Open Sync Wizard</span>
-                </button>
 
-                {/* Offset input */}
-                <div className="flex items-center space-x-1.5">
-                  <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
-                    Offset:
-                  </span>
-                  <input
-                    type="number"
-                    step={0.01}
-                    value={syncOffset}
-                    onChange={(e) =>
-                      setSyncOffset(parseFloat(e.target.value) || 0.0)
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() =>
+                      void runAutoSync(videoFiles, videoDurations, localTelemetry)
                     }
-                    className="w-20 bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
-                  />
-                  <span className="text-[9px] text-zinc-555 uppercase font-bold">
-                    s
-                  </span>
+                    disabled={
+                      videoFiles.length === 0 || autoSyncState.phase === "running"
+                    }
+                    className={`flex items-center space-x-1.5 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition border ${
+                      videoFiles.length > 0 && autoSyncState.phase !== "running"
+                        ? "bg-zinc-950 hover:bg-zinc-800 border-cyan-500/40 text-cyan-400 cursor-pointer"
+                        : "bg-zinc-950 border-zinc-800 text-zinc-600 cursor-not-allowed"
+                    }`}
+                  >
+                    <Sparkles size={12} />
+                    <span>Auto-Sync</span>
+                  </button>
+
+                  <button
+                    onClick={handleOpenSyncWizard}
+                    className="flex items-center space-x-1.5 bg-cyan-500 hover:bg-cyan-600 text-zinc-950 font-black px-3 py-1.5 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                  >
+                    <Sliders size={12} />
+                    <span>Open Sync Wizard</span>
+                  </button>
                 </div>
 
-                {/* Speed Scale input */}
-                <div className="flex items-center space-x-1.5">
-                  <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
-                    Scale:
-                  </span>
-                  <input
-                    type="number"
-                    step={0.001}
-                    min={0.5}
-                    max={2.0}
-                    value={speedScale}
-                    onChange={(e) =>
-                      setSpeedScale(parseFloat(e.target.value) || 1.0)
-                    }
-                    className="w-20 bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
-                  />
-                  <span className="text-[9px] text-zinc-555 uppercase font-bold">
-                    x
-                  </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center space-x-1 bg-zinc-950 border border-zinc-800 rounded-xl p-1">
+                    <button
+                      onClick={() => nudgeSyncOffset(-1.0)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      -1s
+                    </button>
+                    <button
+                      onClick={() => nudgeSyncOffset(-0.1)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      -0.1s
+                    </button>
+                    <button
+                      onClick={() => nudgeSyncOffset(-1 / 60)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-cyan-400 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      -1f
+                    </button>
+                    <div className="flex items-center space-x-1 px-1">
+                      <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
+                        Offset:
+                      </span>
+                      <input
+                        type="number"
+                        step={0.01}
+                        value={syncOffset}
+                        onChange={(e) =>
+                          setSyncOffset(parseFloat(e.target.value) || 0.0)
+                        }
+                        className="w-20 bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-0.5 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
+                      />
+                      <span className="text-[9px] text-zinc-500 uppercase font-bold">
+                        s
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => nudgeSyncOffset(1 / 60)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-cyan-400 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      +1f
+                    </button>
+                    <button
+                      onClick={() => nudgeSyncOffset(0.1)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      +0.1s
+                    </button>
+                    <button
+                      onClick={() => nudgeSyncOffset(1.0)}
+                      className="px-1.5 py-1 rounded-md text-[9px] font-mono font-bold text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      +1s
+                    </button>
+                  </div>
+
+                  <div className="flex items-center space-x-1.5">
+                    <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-bold">
+                      Scale:
+                    </span>
+                    <input
+                      type="number"
+                      step={0.001}
+                      min={0.5}
+                      max={2.0}
+                      value={speedScale}
+                      onChange={(e) =>
+                        setSpeedScale(parseFloat(e.target.value) || 1.0)
+                      }
+                      className="w-20 bg-zinc-950 text-zinc-100 border border-zinc-800 rounded-lg px-2 py-1 text-xs font-mono text-center focus:border-cyan-400 focus:outline-none"
+                    />
+                    <span className="text-[9px] text-zinc-500 uppercase font-bold">
+                      x
+                    </span>
+                  </div>
                 </div>
               </div>
             </div>

@@ -4,6 +4,7 @@ export interface TelemetryRow {
   rpm: number;
   latAcc: number;
   lonAcc: number;
+  gyro: number;
   lat: number;
   lon: number;
   lap: number;
@@ -30,6 +31,7 @@ interface ChannelIndices {
   rpm: number;
   latAcc: number;
   lonAcc: number;
+  gyro: number;
   lat: number;
   lon: number;
   lap: number;
@@ -176,6 +178,7 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     rpm: indices.rpm !== -1 ? headers[indices.rpm] : "",
     latAcc: indices.latAcc !== -1 ? headers[indices.latAcc] : "",
     lonAcc: indices.lonAcc !== -1 ? headers[indices.lonAcc] : "",
+    gyro: indices.gyro !== -1 ? headers[indices.gyro] : "",
     lat: indices.lat !== -1 ? headers[indices.lat] : "",
     lon: indices.lon !== -1 ? headers[indices.lon] : "",
     lap: indices.lap !== -1 ? headers[indices.lap] : "",
@@ -204,6 +207,8 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       indices.latAcc !== -1 ? parseFloatClean(parts[indices.latAcc]) : 0;
     const lonAcc =
       indices.lonAcc !== -1 ? parseFloatClean(parts[indices.lonAcc]) : 0;
+    const gyro =
+      indices.gyro !== -1 ? parseFloatClean(parts[indices.gyro]) : 0;
     const lat = indices.lat !== -1 ? parseFloatClean(parts[indices.lat]) : 0;
     const lon = indices.lon !== -1 ? parseFloatClean(parts[indices.lon]) : 0;
     const lap =
@@ -221,6 +226,7 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       rpm,
       latAcc,
       lonAcc,
+      gyro,
       lat,
       lon,
       lap,
@@ -254,6 +260,7 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
   // divisor against the known AiM sample rates and pick the best fit.
   let detectedSampleRate = 0;
   let timeUnitCorrected = false;
+  let appliedDivisor = 1;
 
   if (rows.length >= 10) {
     const deltas: number[] = [];
@@ -299,8 +306,16 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
             r.time = parseFloat((r.time / bestDivisor).toFixed(4));
           }
           timeUnitCorrected = true;
+          appliedDivisor = bestDivisor;
         }
       }
+    }
+  }
+
+  if (detectedSampleRate === 0 && metadata["Sample Rate"]) {
+    const metaRate = parseFloatClean(metadata["Sample Rate"]);
+    if (metaRate > 0) {
+      detectedSampleRate = metaRate;
     }
   }
 
@@ -315,9 +330,10 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
   let beaconMarkers: number[] = [];
   const rawBeacons = metadata["Beacon Markers"];
   if (rawBeacons) {
+    const startTimeOffsetSec = startTime > 0 ? startTime / appliedDivisor : 0;
     beaconMarkers = rawBeacons
       .split(/\s+/)
-      .map((v) => parseFloat(v))
+      .map((v) => parseFloat(v) - startTimeOffsetSec)
       .filter((v) => !isNaN(v) && v > 0);
   }
 
@@ -393,6 +409,7 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
     rpm: -1,
     latAcc: -1,
     lonAcc: -1,
+    gyro: -1,
     lat: -1,
     lon: -1,
     lap: -1,
@@ -461,6 +478,13 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
         (name.includes("lon") && name.includes("acc")))
     ) {
       indices.lonAcc = i;
+    }
+    // 5b. Gyro / Yaw Rate channel
+    else if (
+      indices.gyro === -1 &&
+      (name.includes("gyro") || name.includes("yaw"))
+    ) {
+      indices.gyro = i;
     }
     // 6. Latitude channel
     else if (
