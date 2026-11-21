@@ -867,6 +867,18 @@ export default function Workspace() {
     }
   };
 
+  const handleSeekToVideoLap = (lapNum: number) => {
+    if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
+    const telStart =
+      lapTimes.starts[lapNum] ??
+      localTelemetry.rows.find((r) => r.lap === lapNum)?.time ??
+      0;
+    const safeScale = speedScale > 0 ? speedScale : 1.0;
+    const targetVideoTime = telStart / safeScale + syncOffset;
+    const clamped = Math.max(0, Math.min(videoDuration || targetVideoTime, targetVideoTime));
+    seekMainVideoGlobal(clamped);
+  };
+
   const seekModalVideo = (globalTime: number) => {
     const clamped = Math.max(0, Math.min(videoDuration || globalTime, globalTime));
     setModalVideoTime(clamped);
@@ -3143,6 +3155,78 @@ export default function Workspace() {
                 </kbd>
                 <span>±1 Frame</span>
               </span>
+            </div>
+          )}
+
+          {localTelemetry && videoUrls.length > 0 && telemetryLaps.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 border-t border-zinc-800/80 pt-3">
+              <div className="flex items-center space-x-1.5 text-[10px] text-zinc-400 uppercase tracking-wider font-black mr-1">
+                <Flag size={11} className="text-cyan-400" />
+                <span>Laps</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {telemetryLaps.map((lapNum) => {
+                  const safeScale = speedScale > 0 ? speedScale : 1.0;
+                  const telStart =
+                    lapTimes.starts[lapNum] ??
+                    localTelemetry.rows.find((r) => r.lap === lapNum)?.time ??
+                    0;
+                  const telEnd =
+                    lapTimes.ends[lapNum] ??
+                    (lapNum === 0 && lapTimes.starts[1] !== undefined
+                      ? lapTimes.starts[1]
+                      : telStart + (lapTimes.laps[lapNum] || 0));
+                  const lapStartVid = telStart / safeScale + syncOffset;
+                  const lapEndVid = telEnd / safeScale + syncOffset;
+                  const isOutOfRange =
+                    videoDuration > 0 &&
+                    (lapEndVid < 0 || lapStartVid > videoDuration);
+                  const isCurrent = currentTelemetry.lap === lapNum;
+                  const isBest = bestLapInfo.lap === lapNum;
+                  const lapDur = lapTimes.laps[lapNum] || 0;
+
+                  return (
+                    <button
+                      key={lapNum}
+                      onClick={() => handleSeekToVideoLap(lapNum)}
+                      disabled={isOutOfRange}
+                      title={
+                        isOutOfRange
+                          ? "Outside video range"
+                          : isBest
+                            ? `Jump to Lap ${lapNum} (Best)`
+                            : lapNum === 0
+                              ? "Jump to Out Lap"
+                              : `Jump to Lap ${lapNum}`
+                      }
+                      className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border transition flex items-center space-x-1.5 ${
+                        isOutOfRange
+                          ? "bg-zinc-950 border-zinc-800/60 text-zinc-600 opacity-40 cursor-not-allowed"
+                          : isCurrent
+                            ? "bg-cyan-500/15 border-cyan-400/60 text-cyan-300 cursor-pointer"
+                            : isBest
+                              ? "bg-zinc-950 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 cursor-pointer"
+                              : "bg-zinc-950 border-zinc-800 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 cursor-pointer"
+                      }`}
+                    >
+                      <span>{lapNum === 0 ? "Out" : `L${lapNum}`}</span>
+                      {lapNum >= 1 && lapDur > 0 && (
+                        <span
+                          className={
+                            isCurrent
+                              ? "text-cyan-200/80"
+                              : isBest
+                                ? "text-emerald-300/80"
+                                : "text-zinc-500"
+                          }
+                        >
+                          {formatLapTime(lapDur)}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           )}
 
