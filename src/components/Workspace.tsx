@@ -126,6 +126,11 @@ export default function Workspace() {
   const [prevVideoDuration, setPrevVideoDuration] = useState(0);
   const [exportStart, setExportStart] = useState<number>(0);
   const [exportEnd, setExportEnd] = useState<number>(0);
+  const [exportStartLap, setExportStartLap] = useState<number | null>(null);
+  const [exportEndLap, setExportEndLap] = useState<number | null>(null);
+  const [exportRangeAnchorLap, setExportRangeAnchorLap] = useState<number | null>(
+    null,
+  );
 
   if (videoDuration !== prevVideoDuration) {
     setPrevVideoDuration(videoDuration);
@@ -552,6 +557,7 @@ export default function Workspace() {
       );
       autoSyncRunIdRef.current++;
       currentSessionKeyRef.current = null;
+      pendingMainSeekRef.current = null;
       latestVideoRef.current = { files, durations: [] };
 
       setVideoFiles(files);
@@ -565,6 +571,9 @@ export default function Workspace() {
       setCurrentTime(0);
       setExportStart(0);
       setExportEnd(0);
+      setExportStartLap(null);
+      setExportEndLap(null);
+      setExportRangeAnchorLap(null);
 
       const durations = await Promise.all(
         urls.map(
@@ -607,6 +616,9 @@ export default function Workspace() {
       setIsProcessing(true);
       setUploadError("");
       setAutoSyncState({ phase: "idle", result: null });
+      setExportStartLap(null);
+      setExportEndLap(null);
+      setExportRangeAnchorLap(null);
 
       try {
         const csvText = await file.text();
@@ -649,6 +661,7 @@ export default function Workspace() {
     const updateInterpolatedTelemetry = () => {
       if (
         !videoRef.current ||
+        pendingMainSeekRef.current !== null ||
         !localTelemetry?.rows ||
         localTelemetry.rows.length === 0
       ) {
@@ -696,7 +709,7 @@ export default function Workspace() {
             lonAcc: Number(match.lonAcc) || 0,
             lat: Number(match.lat) || 0,
             lon: Number(match.lon) || 0,
-            lap: Number(match.lap) || 1,
+            lap: Number.isFinite(Number(match.lap)) ? Number(match.lap) : 1,
             distance: Number((match as any).distance) || 0,
           });
         } else {
@@ -718,6 +731,12 @@ export default function Workspace() {
                 Math.min(1, (telemetryTime - tA) / (tB - tA)),
               );
             }
+
+            const lapRow =
+              low >= rows.length ||
+              (tB - telemetryTime <= 1e-4 && telemetryTime >= tA)
+                ? rowB
+                : rowA;
 
             setCurrentTelemetry({
               speed: isNaN(rowA.speed + fraction * (rowB.speed - rowA.speed))
@@ -742,7 +761,7 @@ export default function Workspace() {
               lon: isNaN(rowA.lon + fraction * (rowB.lon - rowA.lon))
                 ? 0
                 : rowA.lon + fraction * (rowB.lon - rowA.lon),
-              lap: Number(rowA.lap) || 1,
+              lap: Number.isFinite(Number(lapRow.lap)) ? Number(lapRow.lap) : 1,
               distance: isNaN(
                 rowA.distance + fraction * (rowB.distance - rowA.distance),
               )
@@ -870,19 +889,57 @@ export default function Workspace() {
       pendingMainSeekRef.current = { time: localTime, autoPlay: isPlaying };
       setActiveVideoIndex(index);
     } else if (videoRef.current) {
-      videoRef.current.currentTime = localTime;
+      if (pendingMainSeekRef.current !== null && videoRef.current.readyState < 1) {
+        pendingMainSeekRef.current = { time: localTime, autoPlay: isPlaying };
+      } else {
+        pendingMainSeekRef.current = null;
+        videoRef.current.currentTime = localTime;
+      }
     }
+  };
+
+  const getLapVideoBounds = (lapNum: number) => {
+    const safeScale = speedScale > 0 ? speedScale : 1.0;
+    const telStart =
+      lapTimes.starts[lapNum] ??
+      localTelemetry?.rows.find((r) => r.lap === lapNum)?.time ??
+      0;
+    const lapIdx = telemetryLaps.indexOf(lapNum);
+    const nextLapNum =
+      lapIdx !== -1 && lapIdx + 1 < telemetryLaps.length
+        ? telemetryLaps[lapIdx + 1]
+        : undefined;
+    const nextLapStart =
+      nextLapNum !== undefined
+        ? (lapTimes.starts[nextLapNum] ??
+          localTelemetry?.rows.find((r) => r.lap === nextLapNum)?.time)
+        : undefined;
+    const telEnd =
+      nextLapStart ??
+      lapTimes.ends[lapNum] ??
+      telStart + (lapTimes.laps[lapNum] || 0);
+
+    const rawStart = telStart / safeScale + syncOffset;
+    const rawEnd = telEnd / safeScale + syncOffset;
+    const isOutOfRange =
+      videoDuration > 0 && (rawEnd <= 0 || rawStart >= videoDuration);
+    const maxDur = videoDuration > 0 ? videoDuration : Math.max(0, rawEnd);
+    const clampedStart = Math.max(0, Math.min(maxDur, rawStart));
+    const clampedEnd = Math.max(clampedStart, Math.min(maxDur, rawEnd));
+
+    return { rawStart, rawEnd, clampedStart, clampedEnd, isOutOfRange };
   };
 
   const handleSeekToVideoLap = (lapNum: number) => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
-    const telStart =
-      lapTimes.starts[lapNum] ??
-      localTelemetry.rows.find((r) => r.lap === lapNum)?.time ??
-      0;
-    const safeScale = speedScale > 0 ? speedScale : 1.0;
-    const targetVideoTime = telStart / safeScale + syncOffset;
-    const clamped = Math.max(0, Math.min(videoDuration || targetVideoTime, targetVideoTime));
+    const { rawStart, rawEnd } = getLapVideoBounds(lapNum);
+    const lapSpan = rawEnd - rawStart;
+    const nudge = lapSpan > 0 ? Math.min(0.05, lapSpan / 2) : 0.05;
+    const targetVideoTime = rawStart + nudge;
+    const clamped = Math.max(
+      0,
+      Math.min(videoDuration || targetVideoTime, targetVideoTime),
+    );
     seekMainVideoGlobal(clamped);
   };
 
@@ -1036,27 +1093,62 @@ export default function Workspace() {
   };
 
   const seekExportPreview = (globalTime: number) => {
+    const clamped = Math.max(0, Math.min(videoDuration || globalTime, globalTime));
+    setExportPreviewTime(clamped);
     if (videoUrls.length === 0 || videoDurations.length === 0) return;
-    let t = 0;
-    let idx = 0;
-    for (let i = 0; i < videoDurations.length; i++) {
-      if (globalTime >= t && globalTime <= t + videoDurations[i]) {
-        idx = i;
-        break;
-      }
-      t += videoDurations[i];
-    }
 
-    if (idx !== exportActiveVideoIndex) {
-      setExportActiveVideoIndex(idx);
+    const { index, localTime } = resolveVideoClipPosition(
+      clamped,
+      videoDurations,
+    );
+
+    if (index !== exportActiveVideoIndex) {
+      setExportActiveVideoIndex(index);
       if (exportPreviewVideoRef.current) {
-        exportPreviewVideoRef.current.src = videoUrls[idx];
-        exportPreviewVideoRef.current.currentTime = globalTime - t;
+        exportPreviewVideoRef.current.src = videoUrls[index];
+        exportPreviewVideoRef.current.currentTime = localTime;
       }
+    } else if (exportPreviewVideoRef.current) {
+      exportPreviewVideoRef.current.currentTime = localTime;
+    }
+  };
+
+  const applyExportLapRange = (
+    startLap: number,
+    endLap: number,
+    anchorLap: number | null = null,
+  ) => {
+    const lo = Math.min(startLap, endLap);
+    const hi = Math.max(startLap, endLap);
+    const startBounds = getLapVideoBounds(lo);
+    const endBounds = getLapVideoBounds(hi);
+    const newStart = parseFloat(startBounds.clampedStart.toFixed(2));
+    const newEnd = parseFloat(
+      Math.max(newStart, endBounds.clampedEnd).toFixed(2),
+    );
+
+    setExportStartLap(lo);
+    setExportEndLap(hi);
+    setExportRangeAnchorLap(anchorLap);
+    setExportStart(newStart);
+    setExportEnd(newEnd);
+    seekExportPreview(newStart);
+  };
+
+  const handleResetExportFullVideo = () => {
+    setExportStartLap(null);
+    setExportEndLap(null);
+    setExportRangeAnchorLap(null);
+    setExportStart(0);
+    setExportEnd(videoDuration);
+    seekExportPreview(0);
+  };
+
+  const handleExportLapPillClick = (lapNum: number) => {
+    if (exportRangeAnchorLap !== null && exportRangeAnchorLap !== lapNum) {
+      applyExportLapRange(exportRangeAnchorLap, lapNum, null);
     } else {
-      if (exportPreviewVideoRef.current) {
-        exportPreviewVideoRef.current.currentTime = globalTime - t;
-      }
+      applyExportLapRange(lapNum, lapNum, lapNum);
     }
   };
 
@@ -1214,6 +1306,54 @@ export default function Workspace() {
     bestLapInfo,
   ]);
 
+  const effectiveExportEnd =
+    exportEnd === 0 && videoDuration > 0 ? videoDuration : exportEnd;
+
+  const isExportFullVideo =
+    exportStartLap === null &&
+    exportStart === 0 &&
+    (videoDuration === 0 || Math.abs(effectiveExportEnd - videoDuration) < 0.05);
+
+  const exportLapEntries = telemetryLaps.map((lapNum) => {
+    const bounds = getLapVideoBounds(lapNum);
+    const lapDur = lapTimes.laps[lapNum] || 0;
+    const isBest = bestLapInfo.lap === lapNum;
+    const optionLabel =
+      lapNum === 0
+        ? "Out Lap"
+        : `Lap ${lapNum}${lapDur > 0 ? ` (${formatLapTime(lapDur)})` : ""}${isBest ? " ★ Best" : ""}`;
+    return {
+      lapNum,
+      lapDur,
+      isBest,
+      isOutOfRange: bounds.isOutOfRange,
+      optionLabel,
+    };
+  });
+
+  const bestLapExportEntry = exportLapEntries.find((entry) => entry.isBest);
+  const canSelectBestLapExport = Boolean(
+    bestLapExportEntry && !bestLapExportEntry.isOutOfRange,
+  );
+  const isBestLapExportSelected =
+    canSelectBestLapExport &&
+    exportStartLap === bestLapInfo.lap &&
+    exportEndLap === bestLapInfo.lap;
+
+  let exportRangeStatusLabel = "Custom Trim";
+  if (exportStartLap !== null && exportEndLap !== null) {
+    const startLabel = exportStartLap === 0 ? "Out" : `L${exportStartLap}`;
+    const endLabel = exportEndLap === 0 ? "Out" : `L${exportEndLap}`;
+    exportRangeStatusLabel =
+      exportStartLap === exportEndLap
+        ? exportStartLap === 0
+          ? "Out Lap"
+          : `Lap ${exportStartLap}`
+        : `${startLabel} → ${endLabel}`;
+  } else if (isExportFullVideo) {
+    exportRangeStatusLabel = "Full Video";
+  }
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
       {/* EXPORT TRIM PREVIEW MODAL */}
@@ -1278,14 +1418,28 @@ export default function Workspace() {
                 />
               </div>
 
-              {/* Position and Format */}
-              <div className="flex justify-between items-center text-xs font-mono text-zinc-400 bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-850">
+              <div className="flex flex-wrap justify-between items-center gap-2 text-xs font-mono text-zinc-400 bg-zinc-950/60 p-2.5 rounded-xl border border-zinc-850">
                 <div className="flex items-center space-x-1.5">
                   <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">
                     Position:
                   </span>
                   <span className="text-cyan-400 font-bold">
                     {formatTimeMinutes(exportPreviewTime)}
+                  </span>
+                </div>
+                <div className="flex items-center space-x-1.5">
+                  <span className="text-[10px] text-zinc-500 uppercase tracking-wide font-black">
+                    Clip Length:
+                  </span>
+                  <span className="text-emerald-400 font-bold">
+                    {formatTimeMinutes(
+                      Math.max(
+                        0,
+                        (exportEnd === 0 && videoDuration > 0
+                          ? videoDuration
+                          : exportEnd) - exportStart,
+                      ),
+                    )}
                   </span>
                 </div>
                 <div className="flex items-center space-x-1.5">
@@ -1298,9 +1452,205 @@ export default function Workspace() {
                 </div>
               </div>
 
-              {/* Crop control range highlight timeline bar */}
               <div className="flex flex-col space-y-4 bg-zinc-950/40 border border-zinc-800/80 p-4 rounded-2xl">
-                {/* Trim Sliders */}
+                {localTelemetry && telemetryLaps.length > 0 && (
+                  <div className="flex flex-col space-y-3 pb-3.5 border-b border-zinc-800/80">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center space-x-2">
+                        <Flag size={11} className="text-cyan-400" />
+                        <span className="text-[10px] text-zinc-400 font-black uppercase tracking-wider">
+                          Lap Range Filter
+                        </span>
+                        <span className="text-[9px] font-mono font-bold text-cyan-400 bg-cyan-400/10 border border-cyan-400/30 px-2 py-0.5 rounded-md">
+                          {exportRangeStatusLabel}
+                        </span>
+                      </div>
+                      <div className="flex items-center space-x-1.5">
+                        {canSelectBestLapExport && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              applyExportLapRange(
+                                bestLapInfo.lap,
+                                bestLapInfo.lap,
+                                null,
+                              )
+                            }
+                            className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border transition cursor-pointer ${
+                              isBestLapExportSelected
+                                ? "bg-emerald-500/20 border-emerald-400 text-emerald-300"
+                                : "bg-zinc-950 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
+                            }`}
+                          >
+                            Best Lap (L{bestLapInfo.lap})
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleResetExportFullVideo}
+                          className={`px-2 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider border transition cursor-pointer ${
+                            isExportFullVideo
+                              ? "bg-cyan-400/15 border-cyan-400/60 text-cyan-300"
+                              : "bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700"
+                          }`}
+                        >
+                          Full Video
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <label className="flex flex-col space-y-1">
+                        <span className="text-[9px] text-zinc-500 font-black uppercase tracking-wider">
+                          Start Lap (From)
+                        </span>
+                        <select
+                          value={exportStartLap ?? ""}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw === "") {
+                              handleResetExportFullVideo();
+                              return;
+                            }
+                            const nextStart = Number(raw);
+                            if (
+                              !Number.isFinite(nextStart) ||
+                              !telemetryLaps.includes(nextStart)
+                            ) {
+                              return;
+                            }
+                            const nextEnd =
+                              exportEndLap !== null
+                                ? Math.max(nextStart, exportEndLap)
+                                : nextStart;
+                            applyExportLapRange(nextStart, nextEnd, null);
+                          }}
+                          className="bg-zinc-950 border border-zinc-800 rounded-xl px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                        >
+                          <option value="">Custom / Manual</option>
+                          {exportLapEntries.map((entry) => (
+                            <option
+                              key={entry.lapNum}
+                              value={entry.lapNum}
+                              disabled={entry.isOutOfRange}
+                            >
+                              {entry.optionLabel}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label className="flex flex-col space-y-1">
+                        <span className="text-[9px] text-zinc-500 font-black uppercase tracking-wider">
+                          End Lap (To)
+                        </span>
+                        <select
+                          value={exportEndLap ?? ""}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            if (raw === "") {
+                              handleResetExportFullVideo();
+                              return;
+                            }
+                            const nextEnd = Number(raw);
+                            if (
+                              !Number.isFinite(nextEnd) ||
+                              !telemetryLaps.includes(nextEnd)
+                            ) {
+                              return;
+                            }
+                            const nextStart =
+                              exportStartLap !== null
+                                ? Math.min(exportStartLap, nextEnd)
+                                : nextEnd;
+                            applyExportLapRange(nextStart, nextEnd, null);
+                          }}
+                          className="bg-zinc-950 border border-zinc-800 rounded-xl px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 focus:outline-none focus:border-cyan-400/60 cursor-pointer"
+                        >
+                          <option value="">Custom / Manual</option>
+                          {exportLapEntries.map((entry) => (
+                            <option
+                              key={entry.lapNum}
+                              value={entry.lapNum}
+                              disabled={entry.isOutOfRange}
+                            >
+                              {entry.optionLabel}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5 max-h-20 overflow-y-auto pr-1">
+                      {exportLapEntries.map(
+                        ({ lapNum, lapDur, isBest, isOutOfRange }) => {
+                          const isBoundary =
+                            exportStartLap !== null &&
+                            exportEndLap !== null &&
+                            (lapNum === exportStartLap ||
+                              lapNum === exportEndLap);
+                          const isInRange =
+                            exportStartLap !== null &&
+                            exportEndLap !== null &&
+                            lapNum > exportStartLap &&
+                            lapNum < exportEndLap;
+
+                          return (
+                            <button
+                              key={lapNum}
+                              type="button"
+                              onClick={() => handleExportLapPillClick(lapNum)}
+                              disabled={isOutOfRange}
+                              title={
+                                isOutOfRange
+                                  ? "Outside video range"
+                                  : isBest
+                                    ? `Select Lap ${lapNum} (Best)`
+                                    : lapNum === 0
+                                      ? "Select Out Lap"
+                                      : `Select Lap ${lapNum}`
+                              }
+                              className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border transition flex items-center space-x-1.5 ${
+                                isOutOfRange
+                                  ? "bg-zinc-950 border-zinc-800/60 text-zinc-600 opacity-40 cursor-not-allowed"
+                                  : isBoundary
+                                    ? "bg-cyan-400/20 border-cyan-400 text-cyan-300 shadow-[0_0_8px_rgba(34,211,238,0.2)] cursor-pointer"
+                                    : isInRange
+                                      ? "bg-cyan-400/10 border-cyan-400/40 text-cyan-300/90 cursor-pointer"
+                                      : isBest
+                                        ? "bg-zinc-950 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10 cursor-pointer"
+                                        : "bg-zinc-950 border-zinc-800 text-zinc-300 hover:text-zinc-100 hover:border-zinc-700 cursor-pointer"
+                              }`}
+                            >
+                              <span>{lapNum === 0 ? "Out" : `L${lapNum}`}</span>
+                              {lapNum >= 1 && lapDur > 0 && (
+                                <span
+                                  className={
+                                    isBoundary || isInRange
+                                      ? "text-cyan-200/80"
+                                      : isBest
+                                        ? "text-emerald-300/80"
+                                        : "text-zinc-500"
+                                  }
+                                >
+                                  {formatLapTime(lapDur)}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        },
+                      )}
+                    </div>
+
+                    {exportRangeAnchorLap !== null && (
+                      <p className="text-[9px] text-zinc-500 font-semibold">
+                        Tip: Click another lap pill to extend the end of the
+                        range
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex flex-col space-y-3">
                   <div className="flex flex-col space-y-1">
                     <div className="flex justify-between items-center text-[10px] text-zinc-400 font-black uppercase">
@@ -1314,19 +1664,32 @@ export default function Workspace() {
                       <div
                         className="absolute h-1 bg-cyan-400/35 border-l border-r border-cyan-400 rounded"
                         style={{
-                          left: `${(exportStart / videoDuration) * 100}%`,
-                          width: `${((exportEnd - exportStart) / videoDuration) * 100}%`,
+                          left:
+                            videoDuration > 0
+                              ? `${(exportStart / videoDuration) * 100}%`
+                              : "0%",
+                          width:
+                            videoDuration > 0
+                              ? `${(((exportEnd === 0 ? videoDuration : exportEnd) - exportStart) / videoDuration) * 100}%`
+                              : "0%",
                         }}
                       />
                       <input
                         type="range"
                         min={0}
                         max={videoDuration || 100}
-                        step={0.5}
+                        step={0.1}
                         value={exportStart}
                         onChange={(e) => {
                           const val = parseFloat(e.target.value);
-                          const newStart = Math.min(val, exportEnd);
+                          const effectiveEnd =
+                            exportEnd === 0 && videoDuration > 0
+                              ? videoDuration
+                              : exportEnd;
+                          const newStart = Math.min(val, effectiveEnd);
+                          setExportStartLap(null);
+                          setExportEndLap(null);
+                          setExportRangeAnchorLap(null);
                           setExportStart(newStart);
                           seekExportPreview(newStart);
                         }}
@@ -1351,15 +1714,21 @@ export default function Workspace() {
                       <div
                         className="absolute h-1 bg-cyan-400/35 border-l border-r border-cyan-400 rounded"
                         style={{
-                          left: `${(exportStart / videoDuration) * 100}%`,
-                          width: `${((exportEnd - exportStart) / videoDuration) * 100}%`,
+                          left:
+                            videoDuration > 0
+                              ? `${(exportStart / videoDuration) * 100}%`
+                              : "0%",
+                          width:
+                            videoDuration > 0
+                              ? `${(((exportEnd === 0 ? videoDuration : exportEnd) - exportStart) / videoDuration) * 100}%`
+                              : "0%",
                         }}
                       />
                       <input
                         type="range"
                         min={0}
                         max={videoDuration || 100}
-                        step={0.5}
+                        step={0.1}
                         value={
                           exportEnd === 0 && videoDuration > 0
                             ? videoDuration
@@ -1368,6 +1737,9 @@ export default function Workspace() {
                         onChange={(e) => {
                           const val = parseFloat(e.target.value);
                           const newEnd = Math.max(val, exportStart);
+                          setExportStartLap(null);
+                          setExportEndLap(null);
+                          setExportRangeAnchorLap(null);
                           setExportEnd(newEnd);
                           seekExportPreview(newEnd);
                         }}

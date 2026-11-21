@@ -157,7 +157,7 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
         lonAcc: m.lonAcc,
         lat: m.lat,
         lon: m.lon,
-        lap: m.lap || 1,
+        lap: Number.isFinite(m.lap) ? m.lap : 1,
         distance: m.distance || 0,
       };
     } else if (rows[mid].time < telemetryTime) {
@@ -181,12 +181,17 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
       lonAcc: rA?.lonAcc ?? 0,
       lat: rA?.lat ?? 0,
       lon: rA?.lon ?? 0,
-      lap: rA?.lap || 1,
+      lap: Number.isFinite(rA?.lap) ? rA.lap : 1,
       distance: rA?.distance ?? 0,
     };
   }
 
   const frac = Math.max(0, Math.min(1, (telemetryTime - rA.time) / (rB.time - rA.time)));
+  const lapRow =
+    low >= rows.length ||
+    (rB.time - telemetryTime <= 1e-4 && telemetryTime >= rA.time)
+      ? rB
+      : rA;
   return {
     time: rA.time + frac * (rB.time - rA.time),
     speed: rA.speed + frac * (rB.speed - rA.speed),
@@ -195,7 +200,7 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
     lonAcc: rA.lonAcc + frac * (rB.lonAcc - rA.lonAcc),
     lat: rA.lat + frac * (rB.lat - rA.lat),
     lon: rA.lon + frac * (rB.lon - rA.lon),
-    lap: rA.lap || 1,
+    lap: Number.isFinite(lapRow.lap) ? lapRow.lap : 1,
     distance: rA.distance + frac * (rB.distance - rA.distance),
   };
 }
