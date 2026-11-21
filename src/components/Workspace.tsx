@@ -112,7 +112,7 @@ export default function Workspace() {
   // Video Ref & Playback state
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
-  const exportCancelRef = useRef(false);
+  const exportWorkerRef = useRef<Worker | null>(null);
   const currentSessionKeyRef = useRef<string | null>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -790,6 +790,13 @@ export default function Workspace() {
     };
   }, [isExporting]);
 
+  useEffect(() => {
+    return () => {
+      exportWorkerRef.current?.terminate();
+      exportWorkerRef.current = null;
+    };
+  }, []);
+
   // Video play controllers
   const togglePlay = () => {
     if (!videoRef.current) return;
@@ -1053,105 +1060,28 @@ export default function Workspace() {
     }
   };
 
-  // GPU ACCELERATED VIDEO OVERLAY EXPORTER
-  const handleExportVideo = async () => {
+  const handleExportVideo = () => {
     if (!videoRef.current || !localTelemetry || videoFiles.length === 0) {
-      alert("Please load both GoPro POV video and CSV Telemetry data first!");
+      setUploadError("Please load both GoPro POV video and CSV Telemetry data first!");
       return;
     }
 
+    if (exportWorkerRef.current) {
+      exportWorkerRef.current.terminate();
+      exportWorkerRef.current = null;
+    }
+
+    setUploadError("");
     setIsExporting(true);
     setExportProgress(0);
-    exportCancelRef.current = false;
     setIsPlaying(false);
     videoRef.current.pause();
 
-    const originalVideo = videoRef.current;
-
-    // Create an offscreen recording canvas matching video dimensions
-    const canvas = document.createElement("canvas");
-    canvas.width = originalVideo.videoWidth || 1280;
-    canvas.height = originalVideo.videoHeight || 720;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      alert("Failed to initialize canvas GPU render context.");
-      setIsExporting(false);
-      return;
-    }
-
+    const canvasWidth = videoRef.current.videoWidth || 1280;
+    const canvasHeight = videoRef.current.videoHeight || 720;
     const actualStart = exportStart;
     const actualEnd = exportEnd > 0 ? exportEnd : videoDuration;
 
-    // Aligned HTML5 Video player for frame scanning
-    const exportVideos = await Promise.all(
-      videoUrls.map(async (url) => {
-        const v = document.createElement("video");
-        v.src = url;
-        v.muted = false; // MUST be unmuted to capture its audio!
-        v.volume = 1.0;
-        v.playsInline = true;
-        v.width = canvas.width;
-        v.height = canvas.height;
-        v.style.position = "absolute";
-        v.style.top = "0";
-        v.style.left = "0";
-        v.style.width = `${canvas.width}px`;
-        v.style.height = `${canvas.height}px`;
-        v.style.zIndex = "-9999";
-        v.style.opacity = "0.01";
-        v.style.pointerEvents = "none";
-        document.body.appendChild(v);
-        await new Promise<void>((resolve) => {
-          v.onloadeddata = () => resolve();
-        });
-        return v;
-      }),
-    );
-
-    let currentExportVideoIndex = 0;
-    let exportVideo = exportVideos[currentExportVideoIndex];
-
-    // Capture the stream at 60 FPS for buttery smooth playback
-    const canvasStream = canvas.captureStream(60);
-
-    // Set up Audio Mixing from original video
-    let audioStreamTrack: MediaStreamTrack | null = null;
-    try {
-      const audioCtx = new (
-        window.AudioContext ||
-        (window as typeof window & { webkitAudioContext?: typeof AudioContext })
-          .webkitAudioContext
-      )();
-
-      // Explicitly resume the AudioContext (browsers block background audio until resumed)
-      if (audioCtx.state === "suspended") {
-        await audioCtx.resume();
-      }
-
-      const dest = audioCtx.createMediaStreamDestination();
-
-      // Pipe all video audio sources to our recording stream destination
-      exportVideos.forEach((v) => {
-        const source = audioCtx.createMediaElementSource(v);
-        source.connect(dest);
-      });
-
-      // NOTE: We do NOT connect source to audioCtx.destination!
-      // This prevents the audio from double-playing through the user's speakers,
-      // but still captures it perfectly into the output recording stream!
-
-      audioStreamTrack = dest.stream.getAudioTracks()[0];
-    } catch (e) {
-      console.warn("Could not capture video audio stream track:", e);
-    }
-
-    // Merge audio track into canvas stream
-    const exportStream = new MediaStream(canvasStream.getVideoTracks());
-    if (audioStreamTrack) {
-      exportStream.addTrack(audioStreamTrack);
-    }
-
-    // Initialize MediaRecorder with parameters optimized for hardware acceleration and stability
     const bitrates: Record<string, number> = {
       standard: 15_000_000,
       high: 30_000_000,
@@ -1159,905 +1089,98 @@ export default function Workspace() {
     };
     const targetBitrate = bitrates[exportQuality] || 30_000_000;
 
-    let options: MediaRecorderOptions = {};
-    const preferredTypes = [
-      "video/webm;codecs=h264,opus",
-      "video/mp4;codecs=avc1",
-      "video/webm;codecs=vp8,opus",
-      "video/webm;codecs=vp9,opus",
-      "video/webm",
-    ];
-    for (const mimeType of preferredTypes) {
-      if (MediaRecorder.isTypeSupported(mimeType)) {
-        options = { mimeType, videoBitsPerSecond: targetBitrate };
-        break;
-      }
-    }
+    const worker = new Worker(new URL("../workers/exportWorker.ts", import.meta.url));
+    exportWorkerRef.current = worker;
 
-    const mediaRecorder = new MediaRecorder(exportStream, options);
-    const chunks: Blob[] = [];
-    let isRecording = false;
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
-    };
-
-    mediaRecorder.onstop = () => {
-      isRecording = false;
-      exportVideos.forEach((v) => {
-        v.pause();
-        if (v.parentNode) {
-          document.body.removeChild(v);
-        }
-      });
-
-      if (exportCancelRef.current) {
-        setIsExporting(false);
-        return;
-      }
-
-      const actualMime = options.mimeType || "video/webm";
-      const fileExt = actualMime.includes("mp4") ? "mp4" : "webm";
-      const blob = new Blob(chunks, { type: actualMime });
-
-      const finishExport = (finalBlob: Blob) => {
-        const url = URL.createObjectURL(finalBlob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `overlay_render.${fileExt}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        setIsExporting(false);
-      };
-
-      if (fileExt === "webm") {
-        import("fix-webm-duration")
-          .then((fixWebmDuration) => {
-            const durationMs = (actualEnd - actualStart) * 1000;
-            const ysFixWebmDuration =
-              fixWebmDuration.default || fixWebmDuration;
-            if (typeof ysFixWebmDuration === "function") {
-              ysFixWebmDuration(blob, durationMs, { logger: false })
-                .then(finishExport)
-                .catch((err: Error) => {
-                  console.error("Failed to fix webm duration", err);
-                  finishExport(blob);
-                });
-            } else {
-              finishExport(blob);
+    worker.onmessage = (e: MessageEvent) => {
+      const data = e.data;
+      if (data?.type === "progress") {
+        setExportProgress(data.percent);
+        if (data.previewBitmap) {
+          const bitmap = data.previewBitmap as ImageBitmap;
+          if (previewCanvasRef.current) {
+            const pCtx = previewCanvasRef.current.getContext("2d");
+            if (pCtx) {
+              pCtx.clearRect(0, 0, previewCanvasRef.current.width, previewCanvasRef.current.height);
+              pCtx.drawImage(
+                bitmap,
+                0,
+                0,
+                previewCanvasRef.current.width,
+                previewCanvasRef.current.height,
+              );
             }
-          })
-          .catch((err) => {
-            console.error("Failed to load fix-webm-duration", err);
-            finishExport(blob);
-          });
-      } else {
-        finishExport(blob);
-      }
-    };
-
-    // Find starting video and relative time
-    let relativeStart = actualStart;
-    let cumulative = 0;
-    for (let i = 0; i < videoDurations.length; i++) {
-      if (
-        actualStart < cumulative + videoDurations[i] ||
-        i === videoDurations.length - 1
-      ) {
-        currentExportVideoIndex = i;
-        relativeStart = actualStart - cumulative;
-        break;
-      }
-      cumulative += videoDurations[i];
-    }
-
-    exportVideo = exportVideos[currentExportVideoIndex];
-    exportVideo.currentTime = relativeStart;
-
-    const onSeeked = () => {
-      exportVideo.removeEventListener("seeked", onSeeked);
-      isRecording = true;
-      mediaRecorder.start(100); // 100ms timeslices for stable memory usage
-      exportVideo.play();
-    };
-    exportVideo.addEventListener("seeked", onSeeked);
-
-    let gHistory: { x: number; y: number }[] = [];
-    let trackPath = "";
-    let trackScale = 1;
-    let trackMinLon = 0;
-    let trackMaxLat = 0;
-    let trackHasGPS = false;
-    let tPadding = 20;
-    let tSvgW = 200,
-      tSvgH = 200;
-    let trackLonSpan = 0;
-    let trackLatSpan = 0;
-
-    const filteredGpsPoints = gpsPoints.filter((p: { lat: number; lon: number }) => p.lat !== 0 && p.lon !== 0);
-    if (filteredGpsPoints.length > 5) {
-      let minLat = Infinity,
-        maxLat = -Infinity,
-        minLon = Infinity,
-        maxLon = -Infinity;
-      for (const p of filteredGpsPoints) {
-        if (p.lat < minLat) minLat = p.lat;
-        if (p.lat > maxLat) maxLat = p.lat;
-        if (p.lon < minLon) minLon = p.lon;
-        if (p.lon > maxLon) maxLon = p.lon;
-      }
-      trackLatSpan = maxLat - minLat;
-      trackLonSpan = maxLon - minLon;
-      if (trackLatSpan > 0 && trackLonSpan > 0) {
-        trackHasGPS = true;
-        const scaleX = (tSvgW - tPadding * 2) / trackLonSpan;
-        const scaleY = (tSvgH - tPadding * 2) / trackLatSpan;
-        trackScale = Math.min(scaleX, scaleY);
-        trackMinLon = minLon;
-        trackMaxLat = maxLat;
-
-        filteredGpsPoints.forEach((p: { lat: number; lon: number }, idx: number) => {
-          const x =
-            tPadding +
-            (p.lon - minLon) * trackScale +
-            (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
-          const y =
-            tPadding +
-            (maxLat - p.lat) * trackScale +
-            (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
-          if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
-          else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-        });
-        trackPath += " Z";
-      }
-    }
-
-    const cachedPath2D = trackHasGPS ? new Path2D(trackPath) : null;
-
-    const renderLoop = () => {
-      if (!isRecording || exportCancelRef.current) {
-        if (exportCancelRef.current && mediaRecorder.state !== "inactive") {
-          mediaRecorder.stop();
-        }
-        return;
-      }
-
-      const vTimeLocal = exportVideo.currentTime;
-      const vTime =
-        videoDurations
-          .slice(0, currentExportVideoIndex)
-          .reduce((a, b) => a + b, 0) + vTimeLocal;
-
-      if (vTime >= actualEnd || exportVideo.ended) {
-        if (
-          exportVideo.ended &&
-          currentExportVideoIndex < exportVideos.length - 1 &&
-          vTime < actualEnd
-        ) {
-          // Move to next video
-          currentExportVideoIndex++;
-          exportVideo = exportVideos[currentExportVideoIndex];
-          exportVideo.currentTime = 0;
-          exportVideo.play();
-          requestAnimationFrame(renderLoop);
-          return;
-        } else {
-          if (mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
           }
-          isRecording = false;
-          return;
+          bitmap.close();
         }
-      }
-
-      // 1. Draw video frame to canvas
-      ctx.drawImage(exportVideo, 0, 0, canvas.width, canvas.height);
-
-      // 2. Interpolate active telemetry metrics
-      const totalExportDuration = actualEnd - actualStart;
-      setExportProgress(
-        Math.max(
-          0,
-          Math.min(
-            100,
-            Math.round(((vTime - actualStart) / totalExportDuration) * 100),
-          ),
-        ),
-      );
-
-      const tTime = (vTime - syncOffset) * speedScale;
-      const rows = localTelemetry.rows;
-      let matchedTelemetry = {
-        speed: 0,
-        rpm: 0,
-        latAcc: 0,
-        lonAcc: 0,
-        lat: 0,
-        lon: 0,
-        lap: 1,
-        distance: 0,
-      };
-
-      // Simple interpolation loop
-      let low = 0,
-        high = rows.length - 1;
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        if (rows[mid].time === tTime) {
-          const m = rows[mid];
-          matchedTelemetry = {
-            speed: m.speed,
-            rpm: m.rpm,
-            latAcc: m.latAcc,
-            lonAcc: m.lonAcc,
-            lat: m.lat,
-            lon: m.lon,
-            lap: m.lap || 1,
-            distance: m.distance || 0,
-          };
-          break;
-        } else if (rows[mid].time < tTime) low = mid + 1;
-        else high = mid - 1;
-      }
-
-      if (matchedTelemetry.speed === 0) {
-        const idxA = Math.max(0, Math.min(high, rows.length - 2));
-        const idxB = idxA + 1;
-        const rA = rows[idxA],
-          rB = rows[idxB];
-        if (rA && rB && rB.time !== rA.time) {
-          const frac = Math.max(
-            0,
-            Math.min(1, (tTime - rA.time) / (rB.time - rA.time)),
-          );
-          matchedTelemetry = {
-            speed: rA.speed + frac * (rB.speed - rA.speed),
-            rpm: rA.rpm + frac * (rB.rpm - rA.rpm),
-            latAcc: rA.latAcc + frac * (rB.latAcc - rA.latAcc),
-            lonAcc: rA.lonAcc + frac * (rB.lonAcc - rA.lonAcc),
-            lat: rA.lat + frac * (rB.lat - rA.lat),
-            lon: rA.lon + frac * (rB.lon - rA.lon),
-            lap: rA.lap || 1,
-            distance: rA.distance + frac * (rB.distance - rA.distance),
-          };
-        }
-      }
-
-      // Maintain G-Force trace history
-      if (
-        gHistory.length === 0 ||
-        gHistory[gHistory.length - 1].x !== matchedTelemetry.latAcc ||
-        gHistory[gHistory.length - 1].y !== matchedTelemetry.lonAcc
-      ) {
-        gHistory.push({
-          x: matchedTelemetry.latAcc,
-          y: matchedTelemetry.lonAcc,
-        });
-        if (gHistory.length > 6) gHistory.shift();
-      }
-
-      // 3. Render Telemetry overlays on top of the canvas frame
-      drawCanvasHUD(
-        ctx,
-        canvas.width,
-        canvas.height,
-        matchedTelemetry,
-        gHistory,
-        {
-          cachedPath2D,
-          trackScale,
-          trackMinLon,
-          trackMaxLat,
-          trackHasGPS,
-          tSvgW,
-          tSvgH,
-          tPadding,
-          trackLonSpan,
-          trackLatSpan,
-          telemetryTime: tTime,
-          lapTimesStarts: lapTimes.starts,
-          lapTimesLaps: lapTimes.laps,
-          lapTimesStartDistances: lapTimes.startDistances,
-          lapTimesDistances: lapTimes.lapDistances,
-          formatLapTime,
-          bestLapTimeStr: formatLapTime(bestLapInfo.time),
-          bestLapNum: bestLapInfo.lap,
-          bestLapRows,
-          maxSpeed: telemetryMaxSpeed,
-          maxRpm: telemetryMaxRpm,
-          telemetryLaps,
-        },
-      );
-
-      // Copy frame to active visible preview canvas if mounted
-      if (previewCanvasRef.current) {
-        const pCtx = previewCanvasRef.current.getContext("2d");
-        if (pCtx) {
-          pCtx.drawImage(
-            canvas,
-            0,
-            0,
-            previewCanvasRef.current.width,
-            previewCanvasRef.current.height,
-          );
-        }
-      }
-
-      requestAnimationFrame(renderLoop);
-    };
-
-    exportVideo.onplay = () => {
-      requestAnimationFrame(renderLoop);
-    };
-  };
-
-  // GPU Canvas Overlay Drawing Functions
-  const drawCanvasHUD = (
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number,
-    tel: {
-      speed: number;
-      rpm: number;
-      latAcc: number;
-      lonAcc: number;
-      lat: number;
-      lon: number;
-      lap: number;
-      distance: number;
-    },
-    gHistory: { x: number; y: number }[],
-    trackMapProps: any,
-  ) => {
-    ctx.save();
-
-    // SPEEDOMETER WIDGET DRAW
-    if (layoutConfig.speedometer?.visible) {
-      const wX = (layoutConfig.speedometer.x / 100) * width;
-      const wY = (layoutConfig.speedometer.y / 100) * height;
-      const wW = (layoutConfig.speedometer.w / 100) * width;
-      const wH = (layoutConfig.speedometer.h / 100) * height;
-
-      const cx = wX + wW / 2;
-      const cy = wY + wH / 2;
-      const r = Math.min(wW, wH) * 0.35;
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-      ctx.lineWidth = r * 0.15;
-      ctx.lineCap = "round";
-      ctx.stroke();
-
-      const maxSpeed = trackMapProps.maxSpeed || 260;
-      const clampedPct = Math.min(1, Math.max(0, tel.speed / maxSpeed));
-      if (clampedPct > 0) {
-        const endAngle = 135 + clampedPct * 270;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
-        ctx.strokeStyle = "#22d3ee";
-        ctx.lineWidth = r * 0.15;
-        ctx.lineCap = "round";
-        ctx.shadowColor = "rgba(34,211,238,0.5)";
-        ctx.shadowBlur = r * 0.1;
-        ctx.stroke();
-        ctx.shadowBlur = 0; // reset
-      }
-
-      ctx.fillStyle = "#ffffff";
-      ctx.font = `bold ${r * 0.55}px monospace`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(Math.round(tel.speed).toString(), cx, cy);
-
-      ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
-      ctx.font = `bold ${r * 0.15}px sans-serif`;
-      ctx.fillText("KM/H", cx, cy + r * 0.35);
-    }
-
-    // RPM GAUGE DRAW
-    if (layoutConfig.rpmGauge?.visible) {
-      const wX = (layoutConfig.rpmGauge.x / 100) * width;
-      const wY = (layoutConfig.rpmGauge.y / 100) * height;
-      const wW = (layoutConfig.rpmGauge.w / 100) * width;
-      const wH = (layoutConfig.rpmGauge.h / 100) * height;
-
-      const cx = wX + wW / 2;
-      const cy = wY + wH / 2;
-      const r = Math.min(wW, wH) * 0.3;
-      const maxRpm = trackMapProps.maxRpm || 15000;
-      const clampedPct = Math.min(1, Math.max(0, tel.rpm / maxRpm));
-
-      let arcColor = "#10b981";
-      if (clampedPct > 0.85) arcColor = "#f43f5e";
-      else if (clampedPct > 0.65) arcColor = "#fb923c";
-      else if (clampedPct > 0.45) arcColor = "#fbbf24";
-
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (405 * Math.PI) / 180);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
-      ctx.lineWidth = r * 0.15;
-      ctx.lineCap = "round";
-      ctx.stroke();
-
-      if (clampedPct > 0) {
-        const endAngle = 135 + clampedPct * 270;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, (135 * Math.PI) / 180, (endAngle * Math.PI) / 180);
-        ctx.strokeStyle = arcColor;
-        ctx.lineWidth = r * 0.15;
-        ctx.lineCap = "round";
-        ctx.shadowColor = arcColor;
-        ctx.shadowBlur = r * 0.1;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-      }
-
-      ctx.fillStyle = "#ffffff";
-      ctx.font = `bold ${r * 0.4}px monospace`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(Math.round(tel.rpm).toString(), cx, cy);
-
-      ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
-      ctx.font = `bold ${r * 0.15}px sans-serif`;
-      ctx.fillText("RPM", cx, cy + r * 0.3);
-    }
-
-    // G-FORCE GAUGE DRAW
-    if (layoutConfig.gForceRadar?.visible) {
-      const wX = (layoutConfig.gForceRadar.x / 100) * width;
-      const wY = (layoutConfig.gForceRadar.y / 100) * height;
-      const wW = (layoutConfig.gForceRadar.w / 100) * width;
-      const wH = (layoutConfig.gForceRadar.h / 100) * height;
-
-      const cx = wX + wW / 2;
-      const cy = wY + wH / 2;
-      const r = Math.min(wW, wH) * 0.35;
-      const maxG = 1.6;
-
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.font = `bold ${r * 0.15}px monospace`;
-      ctx.fillStyle = "rgba(255,255,255,0.7)";
-      ctx.fillText(`LAT: `, cx - r * 0.4, cy - r - r * 0.2);
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
-      ctx.fillText(`${tel.latAcc.toFixed(2)}G`, cx - r * 0.1, cy - r - r * 0.2);
-
-      ctx.fillStyle = "rgba(255,255,255,0.7)";
-      ctx.fillText(`LON: `, cx + r * 0.4, cy - r - r * 0.2);
-      ctx.fillStyle = "rgba(255,255,255,0.9)";
-      ctx.fillText(`${tel.lonAcc.toFixed(2)}G`, cx + r * 0.7, cy - r - r * 0.2);
-
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
-      ctx.lineWidth = Math.max(1, r * 0.015);
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, 2 * Math.PI);
-      ctx.stroke();
-
-      ctx.setLineDash([]);
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * (1.0 / maxG), 0, 2 * Math.PI);
-      ctx.stroke();
-
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
-      ctx.setLineDash([2, 2]);
-      ctx.beginPath();
-      ctx.arc(cx, cy, r * (0.5 / maxG), 0, 2 * Math.PI);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.18)";
-      ctx.beginPath();
-      ctx.moveTo(cx - r, cy);
-      ctx.lineTo(cx + r, cy);
-      ctx.moveTo(cx, cy - r);
-      ctx.lineTo(cx, cy + r);
-      ctx.stroke();
-
-      const getGCoords = (gX: number, gY: number) => {
-        const x = cx - (gX / maxG) * r;
-        const y = cy + (gY / maxG) * r;
-        return {
-          x: Math.max(cx - r, Math.min(cx + r, x)),
-          y: Math.max(cy - r, Math.min(cy + r, y)),
+      } else if (data?.type === "done") {
+        const { buffer, mimeType, fileExt } = data as {
+          buffer?: ArrayBuffer;
+          mimeType: string;
+          fileExt: string;
         };
-      };
-
-      gHistory.slice(0, -1).forEach((gPoint, index) => {
-        const coords = getGCoords(gPoint.x, gPoint.y);
-        const opacity = (index + 1) / gHistory.length;
-        const size = r * 0.03 + opacity * (r * 0.05);
-        ctx.beginPath();
-        ctx.arc(coords.x, coords.y, size, 0, 2 * Math.PI);
-        ctx.fillStyle = `rgba(244, 63, 94, ${opacity * 0.4})`;
-        ctx.fill();
-      });
-
-      const currentCoords = getGCoords(tel.latAcc, tel.lonAcc);
-      ctx.beginPath();
-      ctx.arc(currentCoords.x, currentCoords.y, r * 0.1, 0, 2 * Math.PI);
-      ctx.fillStyle = "#f43f5e";
-      ctx.shadowColor = "rgba(244, 63, 94, 0.8)";
-      ctx.shadowBlur = r * 0.1;
-      ctx.fill();
-      ctx.shadowBlur = 0;
-
-      ctx.beginPath();
-      ctx.arc(currentCoords.x, currentCoords.y, r * 0.03, 0, 2 * Math.PI);
-      ctx.fillStyle = "#ffffff";
-      ctx.fill();
-    }
-
-    // TRACK MAP DRAW
-    if (layoutConfig.trackMap?.visible && trackMapProps.trackHasGPS) {
-      const wX = (layoutConfig.trackMap.x / 100) * width;
-      const wY = (layoutConfig.trackMap.y / 100) * height;
-      const wW = (layoutConfig.trackMap.w / 100) * width;
-      const wH = (layoutConfig.trackMap.h / 100) * height;
-
-      // Create a clipping region or just scale perfectly into the box
-      const scaleToFit = Math.min(
-        wW / trackMapProps.tSvgW,
-        wH / trackMapProps.tSvgH,
-      );
-      const cx = wX + (wW - trackMapProps.tSvgW * scaleToFit) / 2;
-      const cy = wY + (wH - trackMapProps.tSvgH * scaleToFit) / 2;
-
-      ctx.save();
-      ctx.translate(cx, cy);
-      ctx.scale(scaleToFit, scaleToFit);
-
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-
-      if (trackMapProps.cachedPath2D) {
-        ctx.strokeStyle = "rgba(255,255,255,0.25)";
-        ctx.lineWidth = 5;
-        ctx.stroke(trackMapProps.cachedPath2D);
-
-        ctx.strokeStyle = "rgba(255,255,255,0.75)";
-        ctx.lineWidth = 2;
-        ctx.stroke(trackMapProps.cachedPath2D);
-      }
-
-      // Draw current pos
-      if (tel.lat !== 0 && tel.lon !== 0) {
-        const ptX =
-          trackMapProps.tPadding +
-          (tel.lon - trackMapProps.trackMinLon) * trackMapProps.trackScale +
-          (trackMapProps.tSvgW -
-            trackMapProps.tPadding * 2 -
-            trackMapProps.trackLonSpan * trackMapProps.trackScale) /
-            2;
-        const ptY =
-          trackMapProps.tPadding +
-          (trackMapProps.trackMaxLat - tel.lat) * trackMapProps.trackScale +
-          (trackMapProps.tSvgH -
-            trackMapProps.tPadding * 2 -
-            trackMapProps.trackLatSpan * trackMapProps.trackScale) /
-            2;
-
-        ctx.beginPath();
-        ctx.arc(ptX, ptY, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = "#22d3ee";
-        ctx.shadowColor = "#22d3ee";
-        ctx.shadowBlur = 8;
-        ctx.fill();
-        ctx.shadowBlur = 0;
-
-        ctx.beginPath();
-        ctx.arc(ptX, ptY, 1.5, 0, 2 * Math.PI);
-        ctx.fillStyle = "#ffffff";
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-
-    // LAP TIMER WIDGET DRAW
-    if (layoutConfig.lapTimer?.visible) {
-      const wX = (layoutConfig.lapTimer.x / 100) * width;
-      const wY = (layoutConfig.lapTimer.y / 100) * height;
-      const wW = (layoutConfig.lapTimer.w / 100) * width;
-      const cqw = wW / 100;
-      const wH = 34 * cqw; // matches React component height: 5(pt) + 4.5(lap) + 2.5(mt) + 3.5(label) + 0.5(mt) + 12(value) + 6(pb) = 34cqw
-
-      ctx.save();
-
-      // Background and border-radius
-      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
-      ctx.fillStyle = "rgba(9, 9, 11, 0.7)";
-      ctx.fill();
-
-      // Left border clip & draw
-      ctx.save();
-      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
-      ctx.clip();
-      ctx.fillStyle = "#22d3ee";
-      ctx.fillRect(wX, wY, 1.5 * cqw, wH);
-      ctx.restore();
-
-      // Outer border
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.8)";
-      ctx.lineWidth = 1;
-      drawRoundedRect(ctx, wX, wY, wW, wH, 6 * cqw);
-      ctx.stroke();
-
-      const elapsed = Math.max(
-        0,
-        (trackMapProps.telemetryTime || 0) -
-          (trackMapProps.lapTimesStarts?.[tel.lap] || 0),
-      );
-      const curTimeStr = trackMapProps.formatLapTime
-        ? trackMapProps.formatLapTime(elapsed)
-        : "0:00.00";
-      const bestTimeStr = trackMapProps.bestLapTimeStr || "0:00.00";
-
-      ctx.textBaseline = "top";
-
-      // LAP Text
-      ctx.fillStyle = "#22d3ee";
-      ctx.font = `900 ${4.5 * cqw}px sans-serif`;
-      ctx.textAlign = "left";
-      ctx.fillText(`LAP ${tel.lap}`, wX + 5 * cqw, wY + 5 * cqw);
-
-      // Best and Last Lap Times
-      let rightY = wY + 5 * cqw;
-
-      if (bestTimeStr !== "0:00.00") {
-        ctx.textAlign = "right";
-        const bestLabel =
-          trackMapProps.bestLapNum > 0
-            ? `BEST (L${trackMapProps.bestLapNum}):`
-            : "BEST:";
-
-        ctx.fillStyle = "#10b981"; // emerald-400
-        ctx.font = `900 ${4.5 * cqw}px monospace`;
-        const timeWidth = ctx.measureText(bestTimeStr).width;
-
-        ctx.fillText(bestTimeStr, wX + wW - 5 * cqw, rightY);
-
-        ctx.fillStyle = "#71717a"; // zinc-500
-        ctx.font = `900 ${3.5 * cqw}px sans-serif`;
-        ctx.fillText(
-          bestLabel,
-          wX + wW - 5 * cqw - timeWidth - 1.5 * cqw,
-          rightY + 0.5 * cqw,
-        );
-
-        rightY += 4.5 * cqw + 0.5 * cqw;
-      }
-
-      const prevDuration = trackMapProps.lapTimesLaps?.[tel.lap - 1] || 0;
-      if (prevDuration > 0 && trackMapProps.formatLapTime) {
-        const lastTimeStr = trackMapProps.formatLapTime(prevDuration);
-        ctx.textAlign = "right";
-
-        ctx.fillStyle = "#d4d4d8"; // zinc-300
-        ctx.font = `bold ${4.5 * cqw}px monospace`;
-        const timeWidth = ctx.measureText(lastTimeStr).width;
-
-        ctx.fillText(lastTimeStr, wX + wW - 5 * cqw, rightY);
-
-        ctx.fillStyle = "#71717a"; // zinc-500
-        ctx.font = `900 ${3.5 * cqw}px sans-serif`;
-        ctx.fillText(
-          "LAST:",
-          wX + wW - 5 * cqw - timeWidth - 1.5 * cqw,
-          rightY + 0.5 * cqw,
-        );
-      }
-
-      // CURRENT TIME Label
-      ctx.fillStyle = "rgba(161, 161, 170, 1)"; // zinc-400
-      ctx.font = `bold ${3.5 * cqw}px sans-serif`;
-      ctx.textAlign = "left";
-      ctx.fillText("CURRENT TIME", wX + 5 * cqw, wY + 12 * cqw);
-
-      // CURRENT TIME Value
-      ctx.fillStyle = "#f4f4f5";
-      ctx.font = `900 ${12 * cqw}px monospace`;
-      ctx.fillText(curTimeStr, wX + 5 * cqw, wY + 16 * cqw);
-
-      ctx.restore();
-    }
-
-    // DELTA BAR WIDGET DRAW
-    if (layoutConfig.deltaBar?.visible) {
-      const wX = (layoutConfig.deltaBar.x / 100) * width;
-      const wY = (layoutConfig.deltaBar.y / 100) * height;
-      const wW = (layoutConfig.deltaBar.w / 100) * width;
-      const cqw = wW / 100;
-
-      ctx.save();
-
-      const bestLapNum = trackMapProps.bestLapNum || 0;
-      const bestLapRows = trackMapProps.bestLapRows || [];
-      const hasBestLap = bestLapNum > 0 && bestLapRows.length > 0;
-
-      let delta = 0;
-      const tLaps: number[] = trackMapProps.telemetryLaps || [];
-      const isOutLap = tLaps.length > 0 && tel.lap === tLaps[0];
-      const isInLap = tLaps.length > 1 && tel.lap === tLaps[tLaps.length - 1];
-
-      if (hasBestLap && tel.lap !== bestLapNum && !isOutLap && !isInLap) {
-        const startDistances = trackMapProps.lapTimesStartDistances || {};
-        const starts = trackMapProps.lapTimesStarts || {};
-        const lapDistances = trackMapProps.lapTimesDistances || {};
-
-        const curStartDist = startDistances[tel.lap] || 0;
-        const curStartTime = starts[tel.lap] || 0;
-
-        const elapsedDist = tel.distance - curStartDist;
-        const elapsedTime = (trackMapProps.telemetryTime || 0) - curStartTime;
-
-        const bestStartDist = startDistances[bestLapNum] || 0;
-        const bestStartTime = starts[bestLapNum] || 0;
-
-        const bestLapTotalDist = lapDistances[bestLapNum] || 0;
-        const currentLapTotalDist = lapDistances[tel.lap] || 0;
-
-        let scaledElapsedDist = elapsedDist;
-        if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
-          scaledElapsedDist =
-            elapsedDist * (bestLapTotalDist / currentLapTotalDist);
-          scaledElapsedDist = Math.max(
-            0,
-            Math.min(bestLapTotalDist, scaledElapsedDist),
-          );
+        if (buffer) {
+          const blob = new Blob([buffer], { type: mimeType });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `overlay_render.${fileExt}`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
         }
-
-        let low = 0;
-        let high = bestLapRows.length - 1;
-        let matchIdx = -1;
-
-        while (low <= high) {
-          const mid = Math.floor((low + high) / 2);
-          const midDist = bestLapRows[mid].distance - bestStartDist;
-          if (midDist === scaledElapsedDist) {
-            matchIdx = mid;
-            break;
-          } else if (midDist < scaledElapsedDist) {
-            low = mid + 1;
-          } else {
-            high = mid - 1;
-          }
+        worker.terminate();
+        if (exportWorkerRef.current === worker) {
+          exportWorkerRef.current = null;
         }
-
-        let bestLapTime = 0;
-        if (matchIdx !== -1) {
-          bestLapTime = bestLapRows[matchIdx].time - bestStartTime;
-        } else {
-          const idxB = Math.min(low, bestLapRows.length - 1);
-          const idxA = Math.max(0, idxB - 1);
-          const rowA = bestLapRows[idxA];
-          const rowB = bestLapRows[idxB];
-
-          const distA = rowA.distance - bestStartDist;
-          const distB = rowB.distance - bestStartDist;
-
-          let fraction = 0;
-          if (distB !== distA) {
-            fraction = Math.max(
-              0,
-              Math.min(1, (scaledElapsedDist - distA) / (distB - distA)),
-            );
-          }
-
-          const timeA = rowA.time - bestStartTime;
-          const timeB = rowB.time - bestStartTime;
-          bestLapTime = timeA + fraction * (timeB - timeA);
+        setIsExporting(false);
+      } else if (data?.type === "error") {
+        setUploadError(data.message || "Video export failed.");
+        worker.terminate();
+        if (exportWorkerRef.current === worker) {
+          exportWorkerRef.current = null;
         }
-
-        delta = elapsedTime - bestLapTime;
+        setIsExporting(false);
       }
+    };
 
-      // Title
-      ctx.textAlign = "center";
-      ctx.textBaseline = "top";
-      ctx.fillStyle = "#71717a";
-      ctx.font = `900 ${3 * cqw}px sans-serif`;
-      ctx.fillText("LAP DELTA VS BEST", wX + wW / 2, wY + 4 * cqw);
-
-      // Value
-      let valueStr = "0.00";
-      let valColor = "#a1a1aa";
-      if (!hasBestLap) {
-        valueStr = "--.--";
-        valColor = "#71717a";
-      } else if (delta < 0) {
-        valueStr = delta.toFixed(2);
-        valColor = "#22d3ee";
-      } else if (delta > 0) {
-        valueStr = "+" + delta.toFixed(2);
-        valColor = "#f43f5e";
+    worker.onerror = (err) => {
+      setUploadError(err.message || "Export worker encountered an unexpected error.");
+      worker.terminate();
+      if (exportWorkerRef.current === worker) {
+        exportWorkerRef.current = null;
       }
+      setIsExporting(false);
+    };
 
-      ctx.fillStyle = valColor;
-      ctx.font = `900 ${7 * cqw}px monospace`;
-      ctx.fillText(valueStr, wX + wW / 2, wY + 7.5 * cqw);
-
-      // Visual Bar background track
-      const barY = wY + 16 * cqw;
-      const barH = 3 * cqw;
-      const barW = wW - 10 * cqw;
-      const barX = wX + 5 * cqw;
-
-      // Draw bar track rounded rect
-      drawRoundedRect(ctx, barX, barY, barW, barH, 1.5 * cqw);
-      ctx.fillStyle = "#18181b";
-      ctx.fill();
-      ctx.strokeStyle = "rgba(39, 39, 42, 0.6)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      // Center divider tick
-      ctx.fillStyle = "rgba(113, 113, 122, 0.8)";
-      ctx.fillRect(barX + barW / 2 - 0.25 * cqw, barY, 0.5 * cqw, barH);
-
-      // Draw visual delta fill
-      if (hasBestLap && delta !== 0) {
-        const clampLimit = 2.0;
-        const clampedDelta = Math.max(-clampLimit, Math.min(clampLimit, delta));
-        const barPercent = Math.abs(clampedDelta) / clampLimit;
-        const fillW = barPercent * (barW / 2);
-
-        ctx.save();
-        // Clip to the track's rounded rect so ends are rounded perfectly
-        drawRoundedRect(ctx, barX, barY, barW, barH, 1.5 * cqw);
-        ctx.clip();
-
-        if (delta < 0) {
-          ctx.fillStyle = "#22d3ee";
-          ctx.shadowColor = "#22d3ee";
-          ctx.shadowBlur = 6;
-          ctx.fillRect(barX + barW / 2 - fillW, barY, fillW, barH);
-        } else {
-          ctx.fillStyle = "#f43f5e";
-          ctx.shadowColor = "#f43f5e";
-          ctx.shadowBlur = 6;
-          ctx.fillRect(barX + barW / 2, barY, fillW, barH);
-        }
-        ctx.restore();
-      }
-
-      ctx.restore();
-    }
-
-    ctx.save();
-    ctx.font = `${Math.round(height * 0.018)}px sans-serif`;
-    ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
-    ctx.textAlign = "right";
-    ctx.textBaseline = "top";
-    ctx.fillText("OpenRaceRender.com", width * 0.98, height * 0.03);
-    ctx.restore();
-
-    ctx.restore();
-  };
-
-  const drawRoundedRect = (
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-    r: number,
-  ) => {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.lineTo(x + w - r, y);
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    ctx.lineTo(x + w, y + h - r);
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    ctx.lineTo(x + r, y + h);
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    ctx.lineTo(x, y + r);
-    ctx.quadraticCurveTo(x, y, x + r, y);
-    ctx.closePath();
+    worker.postMessage({
+      type: "init",
+      payload: {
+        videoFiles,
+        telemetryRows: localTelemetry.rows,
+        layoutConfig,
+        lapTimesStarts: lapTimes.starts,
+        lapTimesLaps: lapTimes.laps,
+        lapTimesStartDistances: lapTimes.startDistances,
+        lapTimesDistances: lapTimes.lapDistances,
+        bestLapNum: bestLapInfo.lap,
+        bestLapRows,
+        gpsPoints,
+        startFinishCoord,
+        maxSpeed: telemetryMaxSpeed,
+        maxRpm: telemetryMaxRpm,
+        telemetryLaps,
+        syncOffset,
+        speedScale,
+        exportStart: actualStart,
+        exportEnd: actualEnd,
+        canvasWidth,
+        canvasHeight,
+        videoDurations,
+        targetBitrate,
+      },
+    });
   };
 
   // Get active telemetry row details for wizard UI
@@ -2313,12 +1436,11 @@ export default function Workspace() {
                   Exporting Telemetry Overlay
                 </h3>
                 <p className="text-[10px] text-zinc-500 uppercase font-semibold tracking-wider mt-0.5">
-                  Rendering Frame-by-Frame via GPU Hardware Canvas
+                  Offline WebCodecs Hardware Render (Background Worker)
                 </p>
               </div>
             </div>
 
-            {/* Live Preview Canvas container */}
             <div className="relative aspect-video w-full bg-zinc-950 rounded-2xl border border-zinc-850 overflow-hidden shadow-2xl flex items-center justify-center">
               <canvas
                 ref={previewCanvasRef}
@@ -2334,7 +1456,6 @@ export default function Workspace() {
               </div>
             </div>
 
-            {/* Progress bar */}
             <div className="w-full space-y-2">
               <div className="w-full bg-zinc-950 rounded-full h-2.5 overflow-hidden border border-zinc-850">
                 <div
@@ -2345,26 +1466,29 @@ export default function Workspace() {
               <div className="flex justify-between items-center text-xs font-mono font-bold text-zinc-400">
                 <span>{exportProgress}% Completed</span>
                 <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">
-                  Active GPU Render
+                  Active WebCodecs Render
                 </span>
               </div>
             </div>
 
-            {/* Warning Section */}
-            <div className="p-3.5 bg-rose-950/20 border border-rose-900/40 rounded-2xl text-[10px] text-rose-300/90 flex items-start space-x-2 text-left w-full">
-              <span className="font-extrabold uppercase bg-rose-500 text-black px-1 rounded shrink-0">
-                WARNING
+            <div className="p-3.5 bg-cyan-950/20 border border-cyan-900/40 rounded-2xl text-[10px] text-cyan-200/90 flex items-start space-x-2 text-left w-full">
+              <span className="font-extrabold uppercase bg-cyan-400 text-zinc-950 px-1 rounded shrink-0">
+                INFO
               </span>
               <span className="leading-relaxed">
-                <strong>Keep this window/tab open and active!</strong> Switching
-                tabs, minimizing, or backgrounding the browser will freeze or
-                terminate the GPU render process.
+                <strong>Keep this tab open until export completes.</strong>{" "}
+                Rendering runs in a background WebCodecs worker so you can
+                safely switch tabs while it encodes.
               </span>
             </div>
 
             <button
               onClick={() => {
-                exportCancelRef.current = true;
+                if (exportWorkerRef.current) {
+                  exportWorkerRef.current.postMessage({ type: "cancel" });
+                  exportWorkerRef.current.terminate();
+                  exportWorkerRef.current = null;
+                }
                 setIsExporting(false);
               }}
               className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 hover:text-rose-200 font-extrabold text-xs px-8 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"

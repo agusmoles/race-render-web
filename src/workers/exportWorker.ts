@@ -4,17 +4,28 @@ import {
   Mp4OutputFormat,
   WebMOutputFormat,
   BufferTarget,
+  StreamTarget,
   CanvasSource,
   EncodedAudioPacketSource,
   EncodedPacketSink,
   CanvasSink,
   BlobSource,
   ALL_FORMATS,
-  QUALITY_HIGH,
+  QUALITY_VERY_HIGH,
   getFirstEncodableVideoCodec,
   EncodedPacket,
+  type StreamTargetChunk,
+  type Target,
+  type Quality,
 } from "mediabunny";
-import { drawCanvasHUD, type TelemetryPoint, type TrackMapProps, type HUDLayoutConfig } from "../utils/hud-draw";
+import {
+  buildTrackPath,
+  drawCanvasHUD,
+  type GPSPoint,
+  type TelemetryPoint,
+  type TrackMapProps,
+  type HUDLayoutConfig,
+} from "../utils/hud-draw";
 
 interface TelemetryRow {
   time: number;
@@ -38,6 +49,11 @@ interface WorkerInitPayload {
   lapTimesDistances: Record<number, number>;
   bestLapNum: number;
   bestLapRows: TelemetryRow[];
+  gpsPoints: GPSPoint[];
+  startFinishCoord: GPSPoint | null;
+  maxSpeed: number;
+  maxRpm: number;
+  telemetryLaps: number[];
   syncOffset: number;
   speedScale: number;
   exportStart: number;
@@ -45,6 +61,63 @@ interface WorkerInitPayload {
   canvasWidth: number;
   canvasHeight: number;
   videoDurations: number[];
+  targetBitrate: number;
+  writableStream?: WritableStream<StreamTargetChunk>;
+}
+
+const GOOGLE_FONTS_CSS_URL =
+  "https://fonts.googleapis.com/css2?family=Orbitron:wght@450;700;900&family=Inter:wght@350;500;700;900&display=swap";
+
+let fontsLoadPromise: Promise<void> | null = null;
+let cancelled = false;
+
+async function ensureWorkerFonts(): Promise<void> {
+  if (!("fonts" in self) || typeof FontFace === "undefined") return;
+  if (fontsLoadPromise) return fontsLoadPromise;
+
+  fontsLoadPromise = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    try {
+      const res = await fetch(GOOGLE_FONTS_CSS_URL, { signal: controller.signal });
+      if (!res.ok) return;
+      const css = await res.text();
+      const blocks = css.match(/@font-face\s*\{[^}]+\}/g);
+      if (!blocks) return;
+
+      const workerFonts = (self as unknown as { fonts: FontFaceSet }).fonts;
+      const faces: FontFace[] = [];
+
+      for (const block of blocks) {
+        const familyMatch = block.match(/font-family:\s*['"]?([^'";]+)['"]?/i);
+        const weightMatch = block.match(/font-weight:\s*([^;]+)/i);
+        const urlMatch = block.match(/src:\s*url\(([^)]+)\)/i);
+        const rangeMatch = block.match(/unicode-range:\s*([^;]+)/i);
+
+        if (!familyMatch || !urlMatch) continue;
+        const family = familyMatch[1].trim();
+        const url = urlMatch[1].trim().replace(/^['"]|['"]$/g, "");
+        const descriptors: FontFaceDescriptors = {};
+        if (weightMatch) descriptors.weight = weightMatch[1].trim();
+        if (rangeMatch) descriptors.unicodeRange = rangeMatch[1].trim();
+
+        faces.push(new FontFace(family, `url(${url})`, descriptors));
+      }
+
+      const settled = await Promise.allSettled(faces.map((face) => face.load()));
+      for (const result of settled) {
+        if (result.status === "fulfilled") {
+          workerFonts.add(result.value);
+        }
+      }
+    } catch {
+      // Ignore network/offline errors and fall back to system fonts
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  return fontsLoadPromise;
 }
 
 function formatLapTime(secs: number): string {
@@ -55,8 +128,18 @@ function formatLapTime(secs: number): string {
   return `${mins}:${remainingSecs.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
 }
 
-function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): TelemetryPoint & { time: number } {
-  const empty = { time: 0, speed: 0, rpm: 0, latAcc: 0, lonAcc: 0, lat: 0, lon: 0, lap: 1, distance: 0 };
+function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): TelemetryPoint {
+  const empty: TelemetryPoint = {
+    time: 0,
+    speed: 0,
+    rpm: 0,
+    latAcc: 0,
+    lonAcc: 0,
+    lat: 0,
+    lon: 0,
+    lap: 1,
+    distance: 0,
+  };
   if (rows.length === 0) return empty;
 
   let low = 0;
@@ -66,9 +149,22 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
     const mid = Math.floor((low + high) / 2);
     if (rows[mid].time === telemetryTime) {
       const m = rows[mid];
-      return { time: m.time, speed: m.speed, rpm: m.rpm, latAcc: m.latAcc, lonAcc: m.lonAcc, lat: m.lat, lon: m.lon, lap: m.lap || 1, distance: m.distance || 0 };
-    } else if (rows[mid].time < telemetryTime) low = mid + 1;
-    else high = mid - 1;
+      return {
+        time: m.time,
+        speed: m.speed,
+        rpm: m.rpm,
+        latAcc: m.latAcc,
+        lonAcc: m.lonAcc,
+        lat: m.lat,
+        lon: m.lon,
+        lap: m.lap || 1,
+        distance: m.distance || 0,
+      };
+    } else if (rows[mid].time < telemetryTime) {
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
   }
 
   const idxB = Math.min(low, rows.length - 1);
@@ -77,7 +173,17 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
   const rB = rows[idxB];
 
   if (!rA || !rB || rB.time === rA.time) {
-    return { time: rA?.time ?? 0, speed: rA?.speed ?? 0, rpm: rA?.rpm ?? 0, latAcc: rA?.latAcc ?? 0, lonAcc: rA?.lonAcc ?? 0, lat: rA?.lat ?? 0, lon: rA?.lon ?? 0, lap: rA?.lap || 1, distance: rA?.distance ?? 0 };
+    return {
+      time: rA?.time ?? 0,
+      speed: rA?.speed ?? 0,
+      rpm: rA?.rpm ?? 0,
+      latAcc: rA?.latAcc ?? 0,
+      lonAcc: rA?.lonAcc ?? 0,
+      lat: rA?.lat ?? 0,
+      lon: rA?.lon ?? 0,
+      lap: rA?.lap || 1,
+      distance: rA?.distance ?? 0,
+    };
   }
 
   const frac = Math.max(0, Math.min(1, (telemetryTime - rA.time) / (rB.time - rA.time)));
@@ -94,70 +200,18 @@ function interpolateTelemetry(rows: TelemetryRow[], telemetryTime: number): Tele
   };
 }
 
-function buildTrackPath(rows: TelemetryRow[]): {
-  cachedPath2D: Path2D | null;
-  trackScale: number;
-  trackMinLon: number;
-  trackMaxLat: number;
-  trackHasGPS: boolean;
-  tSvgW: number;
-  tSvgH: number;
-  tPadding: number;
-  trackLonSpan: number;
-  trackLatSpan: number;
-} {
-  const tPadding = 20;
-  const tSvgW = 200;
-  const tSvgH = 200;
-
-  const validPoints = rows.filter((p) => p.lat !== 0 && p.lon !== 0);
-  if (validPoints.length <= 5) {
-    return { cachedPath2D: null, trackScale: 1, trackMinLon: 0, trackMaxLat: 0, trackHasGPS: false, tSvgW, tSvgH, tPadding, trackLonSpan: 0, trackLatSpan: 0 };
+function disposeInputs(inputs: Input[]) {
+  for (const input of inputs) {
+    if (Symbol.dispose in input) {
+      (input as Disposable)[Symbol.dispose]();
+    }
   }
-
-  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-  for (const p of validPoints) {
-    if (p.lat < minLat) minLat = p.lat;
-    if (p.lat > maxLat) maxLat = p.lat;
-    if (p.lon < minLon) minLon = p.lon;
-    if (p.lon > maxLon) maxLon = p.lon;
-  }
-
-  const trackLatSpan = maxLat - minLat;
-  const trackLonSpan = maxLon - minLon;
-
-  if (trackLatSpan <= 0 || trackLonSpan <= 0) {
-    return { cachedPath2D: null, trackScale: 1, trackMinLon: 0, trackMaxLat: 0, trackHasGPS: false, tSvgW, tSvgH, tPadding, trackLonSpan, trackLatSpan };
-  }
-
-  const scaleX = (tSvgW - tPadding * 2) / trackLonSpan;
-  const scaleY = (tSvgH - tPadding * 2) / trackLatSpan;
-  const trackScale = Math.min(scaleX, scaleY);
-
-  let trackPath = "";
-  validPoints.forEach((p, idx) => {
-    const x = tPadding + (p.lon - minLon) * trackScale + (tSvgW - tPadding * 2 - trackLonSpan * trackScale) / 2;
-    const y = tPadding + (maxLat - p.lat) * trackScale + (tSvgH - tPadding * 2 - trackLatSpan * trackScale) / 2;
-    if (idx === 0) trackPath += `M ${x.toFixed(2)} ${y.toFixed(2)}`;
-    else trackPath += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
-  });
-  trackPath += " Z";
-
-  return {
-    cachedPath2D: new Path2D(trackPath),
-    trackScale,
-    trackMinLon: minLon,
-    trackMaxLat: maxLat,
-    trackHasGPS: true,
-    tSvgW,
-    tSvgH,
-    tPadding,
-    trackLonSpan,
-    trackLatSpan,
-  };
 }
 
 async function run(payload: WorkerInitPayload) {
+  cancelled = false;
+  await ensureWorkerFonts();
+
   const {
     videoFiles,
     telemetryRows,
@@ -168,6 +222,11 @@ async function run(payload: WorkerInitPayload) {
     lapTimesDistances,
     bestLapNum,
     bestLapRows,
+    gpsPoints,
+    startFinishCoord,
+    maxSpeed,
+    maxRpm,
+    telemetryLaps,
     syncOffset,
     speedScale,
     exportStart,
@@ -175,68 +234,119 @@ async function run(payload: WorkerInitPayload) {
     canvasWidth,
     canvasHeight,
     videoDurations,
+    targetBitrate,
+    writableStream,
   } = payload;
 
-  const trackMapBase = buildTrackPath(telemetryRows);
-  const totalExportDuration = exportEnd - exportStart;
+  const trackSourcePoints =
+    gpsPoints.length > 0 ? gpsPoints : telemetryRows.map((r) => ({ lat: r.lat, lon: r.lon }));
+  const trackMapBase = buildTrackPath(trackSourcePoints);
+  const totalExportDuration = Math.max(0.001, exportEnd - exportStart);
 
-  const offscreen = new OffscreenCanvas(canvasWidth, canvasHeight);
+  const evenWidth = Math.max(2, Math.floor(canvasWidth / 2) * 2);
+  const evenHeight = Math.max(2, Math.floor(canvasHeight / 2) * 2);
+  const pixelScale = Math.max(1, (evenWidth * evenHeight) / (1920 * 1080));
+  const scaledBitrate = Math.min(120_000_000, Math.round((targetBitrate || 30_000_000) * pixelScale));
+
+  const offscreen = new OffscreenCanvas(evenWidth, evenHeight);
   const ctx = offscreen.getContext("2d")!;
 
-  const videoCodec = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"]);
+  const previewW = 640;
+  const previewH = 360;
+  const previewCanvas = new OffscreenCanvas(previewW, previewH);
+  const previewCtx = previewCanvas.getContext("2d")!;
+  const previewScale = Math.min(previewW / evenWidth, previewH / evenHeight);
+  const previewDrawW = Math.round(evenWidth * previewScale);
+  const previewDrawH = Math.round(evenHeight * previewScale);
+  const previewDrawX = Math.round((previewW - previewDrawW) / 2);
+  const previewDrawY = Math.round((previewH - previewDrawH) / 2);
+
+  let videoCodec = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"], {
+    width: evenWidth,
+    height: evenHeight,
+    bitrate: scaledBitrate,
+  });
+  let effectiveBitrate: number | Quality = scaledBitrate;
 
   if (!videoCodec) {
-    self.postMessage({ type: "error", message: "No hardware-accelerated video codec found. Your browser may not support WebCodecs." });
+    videoCodec = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"]);
+    effectiveBitrate = QUALITY_VERY_HIGH;
+  }
+
+  if (!videoCodec) {
+    self.postMessage({
+      type: "error",
+      message: "No hardware-accelerated video codec found. Your browser may not support WebCodecs.",
+    });
     return;
   }
 
   const usesMp4 = videoCodec === "avc";
   const outputFormat = usesMp4 ? new Mp4OutputFormat() : new WebMOutputFormat();
-  const bufferTarget = new BufferTarget();
+  const target: Target = writableStream
+    ? new StreamTarget(writableStream, { chunked: true })
+    : new BufferTarget();
 
-  const output = new Output({ format: outputFormat, target: bufferTarget });
+  const output = new Output({ format: outputFormat, target });
 
   const canvasSource = new CanvasSource(offscreen, {
     codec: videoCodec,
-    bitrate: QUALITY_HIGH,
+    bitrate: effectiveBitrate,
+    keyFrameInterval: 2,
+    latencyMode: "quality",
   });
-  output.addVideoTrack(canvasSource, { frameRate: 60 });
+  output.addVideoTrack(canvasSource);
 
-  const inputs: Input[] = [];
-  for (let vi = 0; vi < videoFiles.length; vi++) {
-    const blob = videoFiles[vi];
-    const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
-    inputs.push(input);
-  }
+  const inputs: Input[] = videoFiles.map(
+    (blob) => new Input({ source: new BlobSource(blob), formats: ALL_FORMATS }),
+  );
 
   let audioSource: EncodedAudioPacketSource | null = null;
-  if (videoFiles.length > 0) {
+  let audioCodecName: string | null = null;
+  const supportedAudioCodecs = outputFormat.getSupportedAudioCodecs();
+
+  if (inputs.length > 0) {
     const firstAudioTrack = await inputs[0].getPrimaryAudioTrack();
     if (firstAudioTrack) {
-      const firstAudioCodec = await firstAudioTrack.getCodec() as "aac" | "opus" | "mp3";
-      audioSource = new EncodedAudioPacketSource(firstAudioCodec);
-      output.addAudioTrack(audioSource);
+      const firstAudioCodec = await firstAudioTrack.getCodec();
+      if (firstAudioCodec && supportedAudioCodecs.includes(firstAudioCodec)) {
+        audioCodecName = firstAudioCodec;
+        audioSource = new EncodedAudioPacketSource(firstAudioCodec);
+        output.addAudioTrack(audioSource);
+      }
     }
   }
 
   await output.start();
 
+  const bestLapTimeStr = formatLapTime(lapTimesLaps[bestLapNum] || 0);
+  const bestLapRowsTyped = bestLapRows as TelemetryPoint[];
+
   let globalFrameIndex = 0;
   let cumulativeVideoOffset = 0;
-  let gHistory: { x: number; y: number }[] = [];
-  let audioTimestampOffset = 0;
+  const gHistory: { x: number; y: number }[] = [];
+  let lastVideoOutTs = -1;
+  let clipAudioMinTs = 0;
+  let lastAudioEndTs = 0;
   let isFirstAudioChunk = true;
+  let lastPercent = -1;
 
   for (let vi = 0; vi < inputs.length; vi++) {
-    const input = inputs[vi];
-    const videoTrack = await input.getPrimaryVideoTrack();
-    if (!videoTrack) {
-      cumulativeVideoOffset += videoDurations[vi];
-      continue;
+    if (cancelled) {
+      await output.cancel();
+      disposeInputs(inputs);
+      return;
     }
 
-    const videoDuration = videoDurations[vi];
+    const input = inputs[vi];
+    const videoDuration = videoDurations[vi] ?? 0;
     const videoStartInGlobal = cumulativeVideoOffset;
+    const videoTrack = await input.getPrimaryVideoTrack();
+
+    if (!videoTrack) {
+      cumulativeVideoOffset += videoDuration;
+      continue;
+    }
 
     const clipStart = Math.max(0, exportStart - videoStartInGlobal);
     const clipEnd = Math.min(videoDuration, exportEnd - videoStartInGlobal);
@@ -246,41 +356,80 @@ async function run(payload: WorkerInitPayload) {
       continue;
     }
 
-    const canvasSink = new CanvasSink(videoTrack);
-    
+    const canvasSink = new CanvasSink(videoTrack, {
+      poolSize: 2,
+      width: evenWidth,
+      height: evenHeight,
+      fit: "cover",
+    });
+
     let audioPacketSink: EncodedPacketSink | null = null;
     let nextAudioPacket: EncodedPacket | null = null;
     let audioDecoderConfig: AudioDecoderConfig | null = null;
 
-    if (audioSource) {
+    if (audioSource && audioCodecName) {
       const audioTrack = await input.getPrimaryAudioTrack();
-      if (audioTrack) {
+      if (audioTrack && (await audioTrack.getCodec()) === audioCodecName) {
         audioPacketSink = new EncodedPacketSink(audioTrack);
         nextAudioPacket = await audioPacketSink.getPacket(clipStart);
+        if (!nextAudioPacket) {
+          nextAudioPacket = await audioPacketSink.getFirstPacket();
+        }
         audioDecoderConfig = await audioTrack.getDecoderConfig();
       }
     }
 
+    const flushAudioPacket = async (pkt: EncodedPacket) => {
+      if (!audioSource) return;
+      const globalAudioTs = videoStartInGlobal + pkt.timestamp;
+      const exportRelativeAudioTs = globalAudioTs - exportStart;
+      const safeAudioTs = Math.max(clipAudioMinTs, exportRelativeAudioTs);
+      clipAudioMinTs = safeAudioTs + 1e-6;
+      lastAudioEndTs = Math.max(lastAudioEndTs, safeAudioTs + Math.max(0, pkt.duration || 0));
+
+      const adjustedPacket = pkt.clone({ timestamp: safeAudioTs });
+      if (isFirstAudioChunk) {
+        await audioSource.add(adjustedPacket, { decoderConfig: audioDecoderConfig || undefined });
+        isFirstAudioChunk = false;
+      } else {
+        await audioSource.add(adjustedPacket);
+      }
+    };
+
     for await (const wrappedCanvas of canvasSink.canvases(clipStart, clipEnd)) {
+      if (cancelled) {
+        await output.cancel();
+        disposeInputs(inputs);
+        return;
+      }
+
       const localFrameTs = wrappedCanvas.timestamp;
       if (localFrameTs < clipStart) {
-        continue; // Skip pre-roll frames! They ruin sync.
+        continue;
       }
-      const exportRelativeTs = videoStartInGlobal + localFrameTs - clipStart;
-      const globalVideoTs = exportRelativeTs + exportStart;
 
-      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-      ctx.drawImage(wrappedCanvas.canvas, 0, 0, canvasWidth, canvasHeight);
+      const globalVideoTs = videoStartInGlobal + localFrameTs;
+      const rawExportRelativeTs = globalVideoTs - exportStart;
+      const exportRelativeTs =
+        lastVideoOutTs < 0
+          ? Math.max(0, rawExportRelativeTs)
+          : Math.max(lastVideoOutTs + 1e-6, rawExportRelativeTs);
+      lastVideoOutTs = exportRelativeTs;
+
+      ctx.clearRect(0, 0, evenWidth, evenHeight);
+      ctx.drawImage(wrappedCanvas.canvas, 0, 0, evenWidth, evenHeight);
 
       const telemetryTime = (globalVideoTs - syncOffset) * speedScale;
       const tel = interpolateTelemetry(telemetryRows, telemetryTime);
 
-      if (gHistory.length === 0 || gHistory[gHistory.length - 1].x !== tel.latAcc || gHistory[gHistory.length - 1].y !== tel.lonAcc) {
+      if (
+        gHistory.length === 0 ||
+        gHistory[gHistory.length - 1].x !== tel.latAcc ||
+        gHistory[gHistory.length - 1].y !== tel.lonAcc
+      ) {
         gHistory.push({ x: tel.latAcc, y: tel.lonAcc });
         if (gHistory.length > 6) gHistory.shift();
       }
-
-      const bestLapRowsAsTelemetryPoints: (TelemetryPoint & { time: number })[] = bestLapRows as (TelemetryPoint & { time: number })[];
 
       const trackMapProps: TrackMapProps = {
         ...trackMapBase,
@@ -290,84 +439,101 @@ async function run(payload: WorkerInitPayload) {
         lapTimesStartDistances,
         lapTimesDistances,
         formatLapTime,
-        bestLapTimeStr: formatLapTime(lapTimesLaps[bestLapNum] || 0),
+        bestLapTimeStr,
         bestLapNum,
-        bestLapRows: bestLapRowsAsTelemetryPoints,
+        bestLapRows: bestLapRowsTyped,
+        startFinishCoord,
+        maxSpeed,
+        maxRpm,
+        telemetryLaps,
       };
 
-      drawCanvasHUD(ctx, canvasWidth, canvasHeight, tel, gHistory, trackMapProps, layoutConfig);
+      drawCanvasHUD(ctx, evenWidth, evenHeight, tel, gHistory, trackMapProps, layoutConfig);
 
-      const frameDuration = wrappedCanvas.duration ?? (1 / 60);
+      const frameDuration = wrappedCanvas.duration ?? 1 / 60;
 
-      // Pump audio up to this video frame
       if (audioSource && audioPacketSink && nextAudioPacket) {
-        while (nextAudioPacket && nextAudioPacket.timestamp <= localFrameTs && nextAudioPacket.timestamp <= clipEnd) {
-          const exportRelativeAudioTs = videoStartInGlobal + nextAudioPacket.timestamp - clipStart;
-          if (exportRelativeAudioTs >= 0) {
-            const adjustedPacket = nextAudioPacket.clone({ timestamp: Math.max(0, exportRelativeAudioTs + audioTimestampOffset) });
-            if (isFirstAudioChunk) {
-              await audioSource.add(adjustedPacket, { decoderConfig: audioDecoderConfig || undefined });
-              isFirstAudioChunk = false;
-            } else {
-              await audioSource.add(adjustedPacket);
-            }
-          }
+        while (
+          nextAudioPacket &&
+          nextAudioPacket.timestamp <= localFrameTs &&
+          nextAudioPacket.timestamp <= clipEnd
+        ) {
+          await flushAudioPacket(nextAudioPacket);
           nextAudioPacket = await audioPacketSink.getNextPacket(nextAudioPacket);
         }
       }
 
       await canvasSource.add(exportRelativeTs, frameDuration);
 
-      const percent = Math.round(Math.min(100, Math.max(0, (exportRelativeTs / totalExportDuration) * 100)));
-      self.postMessage({ type: "progress", percent });
+      const percent = Math.round(
+        Math.min(100, Math.max(0, (exportRelativeTs / totalExportDuration) * 100)),
+      );
+
+      if (globalFrameIndex % 15 === 0) {
+        previewCtx.clearRect(0, 0, previewW, previewH);
+        previewCtx.drawImage(offscreen, previewDrawX, previewDrawY, previewDrawW, previewDrawH);
+        const previewBitmap = previewCanvas.transferToImageBitmap();
+        self.postMessage(
+          { type: "progress", percent, previewBitmap },
+          { transfer: [previewBitmap] },
+        );
+        lastPercent = percent;
+      } else if (percent !== lastPercent) {
+        self.postMessage({ type: "progress", percent });
+        lastPercent = percent;
+      }
 
       globalFrameIndex++;
     }
 
-    // Pump any remaining audio for this clip
     if (audioSource && audioPacketSink && nextAudioPacket) {
       while (nextAudioPacket && nextAudioPacket.timestamp <= clipEnd) {
-        const exportRelativeAudioTs = videoStartInGlobal + nextAudioPacket.timestamp - clipStart;
-        if (exportRelativeAudioTs >= 0) {
-          const adjustedPacket = nextAudioPacket.clone({ timestamp: Math.max(0, exportRelativeAudioTs + audioTimestampOffset) });
-          if (isFirstAudioChunk) {
-            await audioSource.add(adjustedPacket, { decoderConfig: audioDecoderConfig || undefined });
-            isFirstAudioChunk = false;
-          } else {
-            await audioSource.add(adjustedPacket);
-          }
-        }
+        await flushAudioPacket(nextAudioPacket);
         nextAudioPacket = await audioPacketSink.getNextPacket(nextAudioPacket);
       }
     }
 
+    clipAudioMinTs = Math.max(clipAudioMinTs, lastAudioEndTs);
     cumulativeVideoOffset += videoDuration;
-    audioTimestampOffset += clipEnd - clipStart;
   }
 
-  await output.finalize();
-
-  for (const input of inputs) {
-    if (Symbol.dispose in input) {
-      (input as Disposable)[Symbol.dispose]();
-    }
-  }
-
-  const { buffer } = bufferTarget;
-  if (!buffer) {
-    self.postMessage({ type: "error", message: "Export buffer is empty. Something went wrong during encoding." });
+  if (cancelled) {
+    await output.cancel();
+    disposeInputs(inputs);
     return;
   }
 
+  await output.finalize();
+  disposeInputs(inputs);
+
   const mimeType = usesMp4 ? "video/mp4" : "video/webm";
   const fileExt = usesMp4 ? "mp4" : "webm";
-  self.postMessage({ type: "done", buffer, mimeType, fileExt }, { transfer: [buffer] });
+
+  if (target instanceof BufferTarget) {
+    const { buffer } = target;
+    if (!buffer) {
+      self.postMessage({
+        type: "error",
+        message: "Export buffer is empty. Something went wrong during encoding.",
+      });
+      return;
+    }
+    self.postMessage({ type: "done", buffer, mimeType, fileExt }, { transfer: [buffer] });
+  } else {
+    self.postMessage({ type: "done", mimeType, fileExt });
+  }
 }
 
 self.onmessage = (e: MessageEvent) => {
+  if (e.data?.type === "cancel") {
+    cancelled = true;
+    return;
+  }
   if (e.data?.type === "init") {
     run(e.data.payload as WorkerInitPayload).catch((err) => {
-      self.postMessage({ type: "error", message: String(err) });
+      if (!cancelled) {
+        self.postMessage({ type: "error", message: String(err) });
+      }
     });
   }
 };
