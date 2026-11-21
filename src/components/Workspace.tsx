@@ -19,6 +19,7 @@ import {
   Volume2,
   VolumeX,
   Sparkles,
+  RotateCcw,
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
 import { autoSyncWithGpmf, AutoSyncResult } from "@/utils/gpmf-sync";
@@ -35,6 +36,187 @@ interface WidgetLayout {
   w: number;
   h: number;
   visible: boolean;
+}
+
+type WidgetId =
+  | "speedometer"
+  | "rpmGauge"
+  | "gForceRadar"
+  | "trackMap"
+  | "lapTimer"
+  | "deltaBar";
+
+type ResizeCorner = "nw" | "ne" | "sw" | "se";
+
+const HUD_LAYOUT_STORAGE_KEY = "race_render_hud_layout_v1";
+const MIN_WIDGET_SCALE = 0.5;
+const MAX_WIDGET_SCALE = 2.0;
+
+const DEFAULT_LAYOUT_CONFIG: Record<WidgetId, WidgetLayout> = {
+  speedometer: { x: 3, y: 70, w: 20, h: 25, visible: true },
+  rpmGauge: { x: 20, y: 72, w: 18, h: 23, visible: true },
+  gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
+  trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
+  lapTimer: { x: 3, y: 3, w: 26, h: 16, visible: true },
+  deltaBar: { x: 35, y: 3, w: 30, h: 8, visible: true },
+};
+
+const RESIZE_CORNERS: {
+  corner: ResizeCorner;
+  posClass: string;
+  cursorClass: string;
+}[] = [
+  { corner: "nw", posClass: "-top-2 -left-2", cursorClass: "cursor-nwse-resize" },
+  { corner: "ne", posClass: "-top-2 -right-2", cursorClass: "cursor-nesw-resize" },
+  { corner: "sw", posClass: "-bottom-2 -left-2", cursorClass: "cursor-nesw-resize" },
+  { corner: "se", posClass: "-bottom-2 -right-2", cursorClass: "cursor-nwse-resize" },
+];
+
+function createDefaultLayoutConfig(): Record<WidgetId, WidgetLayout> {
+  return {
+    speedometer: { ...DEFAULT_LAYOUT_CONFIG.speedometer },
+    rpmGauge: { ...DEFAULT_LAYOUT_CONFIG.rpmGauge },
+    gForceRadar: { ...DEFAULT_LAYOUT_CONFIG.gForceRadar },
+    trackMap: { ...DEFAULT_LAYOUT_CONFIG.trackMap },
+    lapTimer: { ...DEFAULT_LAYOUT_CONFIG.lapTimer },
+    deltaBar: { ...DEFAULT_LAYOUT_CONFIG.deltaBar },
+  };
+}
+
+function isDefaultLayoutConfig(config: Record<WidgetId, WidgetLayout>): boolean {
+  return (Object.keys(DEFAULT_LAYOUT_CONFIG) as WidgetId[]).every((id) => {
+    const current = config[id];
+    const def = DEFAULT_LAYOUT_CONFIG[id];
+    return (
+      current.x === def.x &&
+      current.y === def.y &&
+      current.w === def.w &&
+      current.h === def.h &&
+      current.visible === def.visible
+    );
+  });
+}
+
+function loadSavedLayoutConfig(): Record<WidgetId, WidgetLayout> {
+  const defaults = createDefaultLayoutConfig();
+  if (typeof window === "undefined") return defaults;
+
+  try {
+    const raw = window.localStorage.getItem(HUD_LAYOUT_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return defaults;
+
+    const record = parsed as Record<string, unknown>;
+    for (const id of Object.keys(DEFAULT_LAYOUT_CONFIG) as WidgetId[]) {
+      const candidate = record[id];
+      if (!candidate || typeof candidate !== "object") continue;
+      const item = candidate as Partial<Record<keyof WidgetLayout, unknown>>;
+      const def = DEFAULT_LAYOUT_CONFIG[id];
+
+      const minW = def.w * MIN_WIDGET_SCALE;
+      const maxW = Math.min(100, def.w * MAX_WIDGET_SCALE);
+      const rawW =
+        typeof item.w === "number" && Number.isFinite(item.w) ? item.w : def.w;
+      const w = parseFloat(Math.max(minW, Math.min(maxW, rawW)).toFixed(1));
+      const h = parseFloat(((w / def.w) * def.h).toFixed(1));
+
+      const rawX =
+        typeof item.x === "number" && Number.isFinite(item.x) ? item.x : def.x;
+      const x = parseFloat(
+        Math.max(0, Math.min(Math.max(0, 100 - w), rawX)).toFixed(1),
+      );
+
+      const rawY =
+        typeof item.y === "number" && Number.isFinite(item.y) ? item.y : def.y;
+      const y = parseFloat(
+        Math.max(0, Math.min(Math.max(0, 100 - Math.min(100, h)), rawY)).toFixed(1),
+      );
+
+      const visible =
+        typeof item.visible === "boolean" ? item.visible : def.visible;
+
+      defaults[id] = { x, y, w, h, visible };
+    }
+  } catch {
+    return defaults;
+  }
+
+  return defaults;
+}
+
+interface HudWidgetFrameProps {
+  widgetId: WidgetId;
+  layout: WidgetLayout;
+  isEditMode: boolean;
+  isResizing: boolean;
+  fitHeight?: boolean;
+  containerQuery?: boolean;
+  onDragStart: (
+    e: React.PointerEvent<HTMLDivElement>,
+    widgetId: WidgetId,
+  ) => void;
+  onResizeStart: (
+    e: React.PointerEvent<HTMLButtonElement>,
+    widgetId: WidgetId,
+    corner: ResizeCorner,
+  ) => void;
+  children: React.ReactNode;
+}
+
+function HudWidgetFrame({
+  widgetId,
+  layout,
+  isEditMode,
+  isResizing,
+  fitHeight = false,
+  containerQuery = false,
+  onDragStart,
+  onResizeStart,
+  children,
+}: HudWidgetFrameProps) {
+  const scalePct = Math.round(
+    (layout.w / DEFAULT_LAYOUT_CONFIG[widgetId].w) * 100,
+  );
+
+  return (
+    <div
+      className={`absolute select-none${containerQuery ? " @container" : ""}${
+        isEditMode
+          ? " pointer-events-auto outline-2 outline-dashed outline-cyan-400 bg-cyan-400/10 cursor-move touch-none"
+          : " transition-all duration-75"
+      }`}
+      style={{
+        left: `${layout.x}%`,
+        top: `${layout.y}%`,
+        width: `${layout.w}%`,
+        height: fitHeight ? "fit-content" : `${layout.h}%`,
+      }}
+      onPointerDown={(e) => onDragStart(e, widgetId)}
+    >
+      {children}
+      {isEditMode &&
+        RESIZE_CORNERS.map(({ corner, posClass, cursorClass }) => (
+          <button
+            key={corner}
+            type="button"
+            aria-label={`Resize ${widgetId}`}
+            className={`absolute ${posClass} w-4 h-4 flex items-center justify-center z-20 touch-none ${cursorClass}`}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onResizeStart(e, widgetId, corner);
+            }}
+          >
+            <span className="w-2.5 h-2.5 rounded-[3px] bg-cyan-400 border border-zinc-950 shadow-[0_0_6px_rgba(34,211,238,0.85)]" />
+          </button>
+        ))}
+      {isEditMode && isResizing && (
+        <span className="absolute -top-6 left-1/2 -translate-x-1/2 pointer-events-none z-20 bg-zinc-950/90 border border-cyan-400/50 text-cyan-300 font-mono text-[9px] font-bold px-1.5 py-0.5 rounded shadow">
+          {scalePct}%
+        </span>
+      )}
+    </div>
+  );
 }
 
 function resolveVideoClipPosition(globalTime: number, durations: number[]) {
@@ -99,15 +281,11 @@ export default function Workspace() {
   // HUD layout config
   const [isEditMode, setIsEditMode] = useState(false);
   const [layoutConfig, setLayoutConfig] = useState<
-    Record<string, WidgetLayout>
-  >({
-    speedometer: { x: 3, y: 70, w: 20, h: 25, visible: true },
-    rpmGauge: { x: 20, y: 72, w: 18, h: 23, visible: true },
-    gForceRadar: { x: 77, y: 68, w: 20, h: 27, visible: true },
-    trackMap: { x: 70, y: 2, w: 28, h: 38, visible: true },
-    lapTimer: { x: 3, y: 3, w: 26, h: 16, visible: true },
-    deltaBar: { x: 35, y: 3, w: 30, h: 8, visible: true },
-  });
+    Record<WidgetId, WidgetLayout>
+  >(loadSavedLayoutConfig);
+  const [resizingWidgetId, setResizingWidgetId] = useState<WidgetId | null>(
+    null,
+  );
 
   // Video Ref & Playback state
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -115,6 +293,7 @@ export default function Workspace() {
   const exportWorkerRef = useRef<Worker | null>(null);
   const currentSessionKeyRef = useRef<string | null>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const overlayStageRef = useRef<HTMLDivElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -832,51 +1011,187 @@ export default function Workspace() {
     }
   };
 
-  // Draggable HUD Widget layout mouse event capturing
-  const dragWidgetRef = useRef<string | null>(null);
-  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const interactionCleanupRef = useRef<(() => void) | null>(null);
 
-  const handleWidgetMouseDown = (e: React.MouseEvent, widgetId: string) => {
-    if (!isEditMode) return;
-    e.preventDefault();
-    dragWidgetRef.current = widgetId;
+  useEffect(() => {
+    try {
+      if (isDefaultLayoutConfig(layoutConfig)) {
+        window.localStorage.removeItem(HUD_LAYOUT_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(
+          HUD_LAYOUT_STORAGE_KEY,
+          JSON.stringify(layoutConfig),
+        );
+      }
+    } catch {
+      return;
+    }
+  }, [layoutConfig]);
 
-    const overlayBounds =
-      e.currentTarget.parentElement?.getBoundingClientRect();
-    if (!overlayBounds) return;
+  useEffect(() => {
+    return () => {
+      interactionCleanupRef.current?.();
+      interactionCleanupRef.current = null;
+    };
+  }, []);
 
-    const widgetBounds = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - widgetBounds.left;
-    const clickY = e.clientY - widgetBounds.top;
+  const isDefaultLayout = useMemo(
+    () => isDefaultLayoutConfig(layoutConfig),
+    [layoutConfig],
+  );
 
-    dragOffsetRef.current = { x: clickX, y: clickY };
+  const handleResetLayout = () => {
+    setLayoutConfig(createDefaultLayoutConfig());
   };
 
-  const handleOverlayMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isEditMode || !dragWidgetRef.current) return;
+  const handleWidgetDragStart = (
+    e: React.PointerEvent<HTMLDivElement>,
+    widgetId: WidgetId,
+  ) => {
+    if (!isEditMode || e.button !== 0) return;
+    const overlayRect = overlayStageRef.current?.getBoundingClientRect();
+    const widgetRect = e.currentTarget.getBoundingClientRect();
+    if (
+      !overlayRect ||
+      overlayRect.width <= 0 ||
+      overlayRect.height <= 0 ||
+      widgetRect.width <= 0 ||
+      widgetRect.height <= 0
+    ) {
+      return;
+    }
+
     e.preventDefault();
+    interactionCleanupRef.current?.();
 
-    const overlayBounds = e.currentTarget.getBoundingClientRect();
-    if (!overlayBounds) return;
+    const offsetX = e.clientX - widgetRect.left;
+    const offsetY = e.clientY - widgetRect.top;
+    const widgetWPct = (widgetRect.width / overlayRect.width) * 100;
+    const widgetHPct = (widgetRect.height / overlayRect.height) * 100;
+    const maxXPct = Math.max(0, 100 - widgetWPct);
+    const maxYPct = Math.max(0, 100 - widgetHPct);
 
-    const xPx = e.clientX - overlayBounds.left - dragOffsetRef.current.x;
-    const yPx = e.clientY - overlayBounds.top - dragOffsetRef.current.y;
+    const handlePointerMove = (ev: PointerEvent) => {
+      const rawXPct =
+        ((ev.clientX - overlayRect.left - offsetX) / overlayRect.width) * 100;
+      const rawYPct =
+        ((ev.clientY - overlayRect.top - offsetY) / overlayRect.height) * 100;
+      const xPct = Math.max(0, Math.min(maxXPct, rawXPct));
+      const yPct = Math.max(0, Math.min(maxYPct, rawYPct));
 
-    const xPct = Math.max(0, Math.min(85, (xPx / overlayBounds.width) * 100));
-    const yPct = Math.max(0, Math.min(85, (yPx / overlayBounds.height) * 100));
+      setLayoutConfig((prev) => ({
+        ...prev,
+        [widgetId]: {
+          ...prev[widgetId],
+          x: parseFloat(xPct.toFixed(1)),
+          y: parseFloat(yPct.toFixed(1)),
+        },
+      }));
+    };
 
-    setLayoutConfig((prev) => ({
-      ...prev,
-      [dragWidgetRef.current!]: {
-        ...prev[dragWidgetRef.current!],
-        x: parseFloat(xPct.toFixed(1)),
-        y: parseFloat(yPct.toFixed(1)),
-      },
-    }));
+    const cleanup = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+      if (interactionCleanupRef.current === cleanup) {
+        interactionCleanupRef.current = null;
+      }
+    };
+
+    interactionCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   };
 
-  const handleOverlayMouseUp = () => {
-    dragWidgetRef.current = null;
+  const handleWidgetResizeStart = (
+    e: React.PointerEvent<HTMLButtonElement>,
+    widgetId: WidgetId,
+    corner: ResizeCorner,
+  ) => {
+    if (!isEditMode || e.button !== 0) return;
+    const overlayRect = overlayStageRef.current?.getBoundingClientRect();
+    const widgetEl = e.currentTarget.parentElement;
+    const widgetRect = widgetEl?.getBoundingClientRect();
+    if (
+      !overlayRect ||
+      overlayRect.width <= 0 ||
+      overlayRect.height <= 0 ||
+      !widgetRect ||
+      widgetRect.width <= 0 ||
+      widgetRect.height <= 0
+    ) {
+      return;
+    }
+
+    e.preventDefault();
+    interactionCleanupRef.current?.();
+    setResizingWidgetId(widgetId);
+
+    const startConfig = layoutConfig[widgetId];
+    const def = DEFAULT_LAYOUT_CONFIG[widgetId];
+    const startX = startConfig.x;
+    const startY = startConfig.y;
+    const startW = startConfig.w;
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+    const startRenderedHPct = (widgetRect.height / overlayRect.height) * 100;
+    const hPerW = startRenderedHPct / startW;
+    const configHPerW = def.h / def.w;
+    const dirX = corner === "ne" || corner === "se" ? 1 : -1;
+    const dirY = corner === "sw" || corner === "se" ? 1 : -1;
+    const anchorX = dirX > 0 ? startX : startX + startW;
+    const anchorY = dirY > 0 ? startY : startY + startRenderedHPct;
+    const minW = def.w * MIN_WIDGET_SCALE;
+    const maxW = Math.min(100, def.w * MAX_WIDGET_SCALE);
+    const denom =
+      widgetRect.width * widgetRect.width +
+      widgetRect.height * widgetRect.height;
+
+    const maxWByX = dirX > 0 ? 100 - anchorX : anchorX;
+    const maxWByY = (dirY > 0 ? 100 - anchorY : anchorY) / hPerW;
+    const upperW = Math.max(minW, Math.min(maxW, maxWByX, maxWByY));
+
+    const handlePointerMove = (ev: PointerEvent) => {
+      const dxPx = ev.clientX - startClientX;
+      const dyPx = ev.clientY - startClientY;
+      const scale =
+        1 +
+        (dxPx * dirX * widgetRect.width + dyPx * dirY * widgetRect.height) /
+          denom;
+      const rawW = startW * scale;
+      const clampedW = Math.max(minW, Math.min(upperW, rawW));
+      const clampedRenderedH = clampedW * hPerW;
+      const clampedConfigH = clampedW * configHPerW;
+      const newX = dirX > 0 ? anchorX : anchorX - clampedW;
+      const newY = dirY > 0 ? anchorY : anchorY - clampedRenderedH;
+
+      setLayoutConfig((prev) => ({
+        ...prev,
+        [widgetId]: {
+          ...prev[widgetId],
+          x: Math.max(0, parseFloat(newX.toFixed(1))),
+          y: Math.max(0, parseFloat(newY.toFixed(1))),
+          w: parseFloat(clampedW.toFixed(1)),
+          h: parseFloat(clampedConfigH.toFixed(1)),
+        },
+      }));
+    };
+
+    const cleanup = () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", cleanup);
+      window.removeEventListener("pointercancel", cleanup);
+      if (interactionCleanupRef.current === cleanup) {
+        interactionCleanupRef.current = null;
+      }
+      setResizingWidgetId(null);
+    };
+
+    interactionCleanupRef.current = cleanup;
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", cleanup);
+    window.addEventListener("pointercancel", cleanup);
   };
 
   const seekMainVideoGlobal = (globalTime: number) => {
@@ -2285,6 +2600,7 @@ export default function Workspace() {
           }
         >
           <div
+            ref={overlayStageRef}
             className={
               isFullscreen
                 ? "relative aspect-video overflow-hidden"
@@ -2295,9 +2611,6 @@ export default function Workspace() {
                 ? { width: "min(100vw, calc(100vh * 16 / 9))" }
                 : undefined
             }
-            onMouseMove={handleOverlayMouseMove}
-            onMouseUp={handleOverlayMouseUp}
-            onMouseLeave={handleOverlayMouseUp}
           >
             {videoUrls.length > 0 ? (
               <video
@@ -2364,80 +2677,63 @@ export default function Workspace() {
 
             {localTelemetry && (
               <div className="absolute inset-0 pointer-events-none">
-                {layoutConfig.speedometer?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.speedometer.x}%`,
-                      top: `${layoutConfig.speedometer.y}%`,
-                      width: `${layoutConfig.speedometer.w}%`,
-                      height: `${layoutConfig.speedometer.h}%`,
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "speedometer")}
+                {layoutConfig.speedometer.visible && (
+                  <HudWidgetFrame
+                    widgetId="speedometer"
+                    layout={layoutConfig.speedometer}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "speedometer"}
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
-                    <Speedometer speed={currentTelemetry.speed} maxSpeed={telemetryMaxSpeed} />
-                  </div>
+                    <Speedometer
+                      speed={currentTelemetry.speed}
+                      maxSpeed={telemetryMaxSpeed}
+                    />
+                  </HudWidgetFrame>
                 )}
 
-                {layoutConfig.rpmGauge?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.rpmGauge.x}%`,
-                      top: `${layoutConfig.rpmGauge.y}%`,
-                      width: `${layoutConfig.rpmGauge.w}%`,
-                      height: `${layoutConfig.rpmGauge.h}%`,
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "rpmGauge")}
+                {layoutConfig.rpmGauge.visible && (
+                  <HudWidgetFrame
+                    widgetId="rpmGauge"
+                    layout={layoutConfig.rpmGauge}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "rpmGauge"}
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
-                    <RpmGauge rpm={currentTelemetry.rpm} maxRpm={telemetryMaxRpm} />
-                  </div>
+                    <RpmGauge
+                      rpm={currentTelemetry.rpm}
+                      maxRpm={telemetryMaxRpm}
+                    />
+                  </HudWidgetFrame>
                 )}
 
-                {layoutConfig.gForceRadar?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none @container ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.gForceRadar.x}%`,
-                      top: `${layoutConfig.gForceRadar.y}%`,
-                      width: `${layoutConfig.gForceRadar.w}%`,
-                      height: `${layoutConfig.gForceRadar.h}%`,
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "gForceRadar")}
+                {layoutConfig.gForceRadar.visible && (
+                  <HudWidgetFrame
+                    widgetId="gForceRadar"
+                    layout={layoutConfig.gForceRadar}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "gForceRadar"}
+                    containerQuery
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
                     <GForceRadar
                       latAcc={currentTelemetry.latAcc}
                       lonAcc={currentTelemetry.lonAcc}
                     />
-                  </div>
+                  </HudWidgetFrame>
                 )}
 
-                {layoutConfig.trackMap?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.trackMap.x}%`,
-                      top: `${layoutConfig.trackMap.y}%`,
-                      width: `${layoutConfig.trackMap.w}%`,
-                      height: `${layoutConfig.trackMap.h}%`,
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "trackMap")}
+                {layoutConfig.trackMap.visible && (
+                  <HudWidgetFrame
+                    widgetId="trackMap"
+                    layout={layoutConfig.trackMap}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "trackMap"}
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
                     <TrackMap
                       gpsPoints={gpsPoints}
@@ -2445,23 +2741,19 @@ export default function Workspace() {
                       currentLon={currentTelemetry.lon}
                       startFinishCoord={startFinishCoord}
                     />
-                  </div>
+                  </HudWidgetFrame>
                 )}
 
-                {layoutConfig.lapTimer?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none @container ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.lapTimer.x}%`,
-                      top: `${layoutConfig.lapTimer.y}%`,
-                      width: `${layoutConfig.lapTimer.w}%`,
-                      height: "fit-content",
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "lapTimer")}
+                {layoutConfig.lapTimer.visible && (
+                  <HudWidgetFrame
+                    widgetId="lapTimer"
+                    layout={layoutConfig.lapTimer}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "lapTimer"}
+                    fitHeight
+                    containerQuery
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
                     <LapTimer
                       currentLap={currentTelemetry.lap}
@@ -2472,36 +2764,32 @@ export default function Workspace() {
                         lapTimes.laps[currentTelemetry.lap - 1] || 0,
                       )}
                     />
-                  </div>
+                  </HudWidgetFrame>
                 )}
 
-                {layoutConfig.deltaBar?.visible && (
-                  <div
-                    className={`absolute transition-all duration-75 select-none @container ${
-                      isEditMode
-                        ? "pointer-events-auto border-2 border-dashed border-cyan-400 cursor-move bg-cyan-400/10 p-1"
-                        : ""
-                    }`}
-                    style={{
-                      left: `${layoutConfig.deltaBar.x}%`,
-                      top: `${layoutConfig.deltaBar.y}%`,
-                      width: `${layoutConfig.deltaBar.w}%`,
-                      height: "fit-content",
-                    }}
-                    onMouseDown={(e) => handleWidgetMouseDown(e, "deltaBar")}
+                {layoutConfig.deltaBar.visible && (
+                  <HudWidgetFrame
+                    widgetId="deltaBar"
+                    layout={layoutConfig.deltaBar}
+                    isEditMode={isEditMode}
+                    isResizing={resizingWidgetId === "deltaBar"}
+                    fitHeight
+                    containerQuery
+                    onDragStart={handleWidgetDragStart}
+                    onResizeStart={handleWidgetResizeStart}
                   >
                     <DeltaBar
                       delta={currentDelta}
                       hasBestLap={bestLapInfo.lap > 0}
                     />
-                  </div>
+                  </HudWidgetFrame>
                 )}
               </div>
             )}
 
             {isEditMode && (
-              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 bg-cyan-500 text-zinc-950 font-extrabold text-[10px] tracking-widest px-3 py-1 rounded-full uppercase z-10 border border-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.5)]">
-                Layout HUD Editor Active - Drag widgets to position
+              <div className="absolute top-4 left-1/2 transform -translate-x-1/2 pointer-events-none bg-cyan-500 text-zinc-950 font-extrabold text-[10px] tracking-widest px-3 py-1 rounded-full uppercase z-10 border border-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.5)]">
+                Layout HUD Editor Active - Drag to move, corners to resize
               </div>
             )}
           </div>
@@ -2915,28 +3203,46 @@ export default function Workspace() {
         {/* Live HUD Customizer Controls */}
         {localTelemetry && (
           <div className="bg-zinc-900/80 backdrop-blur-md border border-zinc-800 p-5 rounded-3xl flex flex-col space-y-4">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center gap-2">
               <h3 className="text-xs font-black uppercase tracking-widest text-zinc-400 flex items-center space-x-2">
                 <Layers size={14} className="text-cyan-400" />
                 <span>HUD Widget Control</span>
               </h3>
-              <button
-                onClick={() => setIsEditMode(!isEditMode)}
-                className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg border transition cursor-pointer ${
-                  isEditMode
-                    ? "bg-cyan-400 text-zinc-950 border-cyan-300 shadow-[0_0_10px_rgba(34,211,238,0.3)]"
-                    : "bg-zinc-950 text-zinc-400 border-zinc-800 hover:bg-zinc-900"
-                }`}
-              >
-                {isEditMode ? "Exit HUD Editor" : "Edit HUD Layout"}
-              </button>
+              <div className="flex items-center space-x-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleResetLayout}
+                  disabled={isDefaultLayout}
+                  title="Reset HUD positions, sizes, and visibility"
+                  className={`flex items-center space-x-1 text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg border transition bg-zinc-950 text-zinc-400 border-zinc-800 ${
+                    isDefaultLayout
+                      ? "opacity-40 cursor-not-allowed"
+                      : "hover:text-zinc-200 hover:border-zinc-700 cursor-pointer"
+                  }`}
+                >
+                  <RotateCcw size={11} />
+                  <span>Reset</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditMode(!isEditMode)}
+                  className={`text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-lg border transition cursor-pointer ${
+                    isEditMode
+                      ? "bg-cyan-400 text-zinc-950 border-cyan-300 shadow-[0_0_10px_rgba(34,211,238,0.3)]"
+                      : "bg-zinc-950 text-zinc-400 border-zinc-800 hover:bg-zinc-900"
+                  }`}
+                >
+                  {isEditMode ? "Exit HUD Editor" : "Edit HUD Layout"}
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2 border-t border-zinc-800/80 pt-3">
-              {Object.keys(layoutConfig).map((widgetKey) => {
-                const config = layoutConfig[widgetKey];
-                const cleanName = widgetKey.replace(/([A-Z])/g, " $1");
-                return (
+              {(Object.keys(DEFAULT_LAYOUT_CONFIG) as WidgetId[]).map(
+                (widgetKey) => {
+                  const config = layoutConfig[widgetKey];
+                  const cleanName = widgetKey.replace(/([A-Z])/g, " $1");
+                  return (
                   <div
                     key={widgetKey}
                     className="flex items-center justify-between text-xs py-1.5"
