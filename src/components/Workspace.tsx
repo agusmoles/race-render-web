@@ -20,6 +20,7 @@ import {
   VolumeX,
   Sparkles,
   RotateCcw,
+  GitCompare,
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
 import { autoSyncWithGpmf, AutoSyncResult } from "@/utils/gpmf-sync";
@@ -29,6 +30,7 @@ import GForceRadar from "./gauges/GForceRadar";
 import TrackMap from "./gauges/TrackMap";
 import LapTimer from "./gauges/LapTimer";
 import DeltaBar from "./gauges/DeltaBar";
+import LapCompareStudio from "./LapCompareStudio";
 
 interface WidgetLayout {
   x: number;
@@ -245,6 +247,8 @@ function formatSyncMethodLabel(method: AutoSyncResult["method"]): string {
 }
 
 export default function Workspace() {
+  const [studioMode, setStudioMode] = useState<"hud" | "compare">("hud");
+
   // Local File Loading
   const [videoFiles, setVideoFiles] = useState<File[]>([]);
   const [videoUrls, setVideoUrls] = useState<string[]>([]);
@@ -1283,7 +1287,7 @@ export default function Workspace() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (isSyncModalOpen || isExportModalOpen || isExporting) return;
+      if (studioMode !== "hud" || isSyncModalOpen || isExportModalOpen || isExporting) return;
       const target = e.target as HTMLElement | null;
       if (target) {
         const tag = target.tagName;
@@ -1354,6 +1358,7 @@ export default function Workspace() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    studioMode,
     videoUrls.length,
     videoDurations,
     videoDuration,
@@ -1670,7 +1675,62 @@ export default function Workspace() {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
+    <div className="w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative flex flex-col space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 bg-zinc-900/80 backdrop-blur-md border border-zinc-800 px-3 py-2 rounded-2xl">
+        <div className="flex items-center space-x-1.5">
+          <button
+            type="button"
+            onClick={() => setStudioMode("hud")}
+            className={`px-3.5 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider flex items-center space-x-2 transition cursor-pointer ${
+              studioMode === "hud"
+                ? "bg-cyan-400 text-zinc-950 shadow-[0_0_15px_rgba(34,211,238,0.25)]"
+                : "bg-zinc-950 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+            }`}
+          >
+            <Video size={14} />
+            <span>POV Video HUD Studio</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (videoRef.current && !videoRef.current.paused) {
+                videoRef.current.pause();
+                setIsPlaying(false);
+              }
+              setStudioMode("compare");
+            }}
+            className={`px-3.5 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider flex items-center space-x-2 transition cursor-pointer ${
+              studioMode === "compare"
+                ? "bg-rose-500 text-zinc-950 shadow-[0_0_15px_rgba(244,63,94,0.3)]"
+                : "bg-zinc-950 text-zinc-400 hover:text-zinc-200 border border-zinc-800"
+            }`}
+          >
+            <GitCompare size={14} />
+            <span>3D Lap Compare Studio</span>
+          </button>
+        </div>
+
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500 px-2">
+          {studioMode === "hud"
+            ? "Video Overlay • GoPro Auto-Sync • WebCodecs GPU Export"
+            : "Multi-CSV Comparison • 3D Track & Ghost Kart Lines"}
+        </span>
+      </div>
+
+      <div className={studioMode === "compare" ? "w-full" : "hidden"}>
+        <LapCompareStudio
+          initialCsvFile={csvFile}
+          initialTelemetry={localTelemetry}
+        />
+      </div>
+
+      <div
+        className={
+          studioMode === "hud"
+            ? "grid grid-cols-1 lg:grid-cols-12 gap-6 w-full relative"
+            : "hidden"
+        }
+      >
       {/* EXPORT TRIM PREVIEW MODAL */}
       {isExportModalOpen && videoUrls.length > 0 && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
@@ -3274,6 +3334,7 @@ export default function Workspace() {
             </div>
           </div>
         )}
+      </div>
       </div>
     </div>
   );
