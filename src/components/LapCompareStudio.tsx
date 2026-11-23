@@ -8,19 +8,24 @@ import {
   Flag,
   Gauge,
   GitCompare,
+  Map as MapIcon,
   Pause,
   Play,
   Route,
   RotateCcw,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import { parseTelemetryCSV, type ParsedTelemetry } from "@/utils/csv-helper";
 import {
   buildAlignedLapPair,
+  buildNeutralTrackCenterline,
   computeComparisonSnapshot,
   createSessionItem,
   formatCompareLapTime,
+  parseCustomTrackFile,
+  type ParsedTrackFile,
   type TelemetrySessionItem,
 } from "@/utils/lap-comparison";
 import Track3DViewer from "./Track3DViewer";
@@ -66,6 +71,8 @@ export default function LapCompareStudio({
   const [selectionB, setSelectionB] = useState<LapSelection | null>(null);
   const [uploadError, setUploadError] = useState("");
   const [isParsing, setIsParsing] = useState(false);
+  const [customTrack, setCustomTrack] = useState<ParsedTrackFile | null>(null);
+  const [trackError, setTrackError] = useState("");
 
   const [syncMode, setSyncMode] = useState<"distance" | "time">("distance");
   const [progress, setProgress] = useState(0);
@@ -153,7 +160,18 @@ export default function LapCompareStudio({
     );
   }, [sessionA, sessionB, effectiveSelectionA, effectiveSelectionB]);
 
-  const { lapA, lapB } = aligned;
+  const { lapA, lapB, origin } = aligned;
+
+  const centerline = useMemo(() => {
+    if (!lapA || !lapB) return [];
+    return buildNeutralTrackCenterline(
+      sessions,
+      lapA,
+      lapB,
+      origin,
+      customTrack?.points ?? null,
+    );
+  }, [sessions, lapA, lapB, origin, customTrack]);
 
   const snapshot = useMemo(() => {
     if (!lapA || !lapB) return null;
@@ -260,6 +278,32 @@ export default function LapCompareStudio({
     setIsPlaying(false);
   };
 
+  const handleTrackFileUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+
+    setTrackError("");
+    try {
+      if (file.size > 20 * 1024 * 1024) {
+        setTrackError("Track file exceeds the 20 MB client limit.");
+        return;
+      }
+      const buffer = await file.arrayBuffer();
+      const parsed = await parseCustomTrackFile(
+        file.name,
+        buffer,
+        origin,
+      );
+      setCustomTrack(parsed);
+    } catch (err) {
+      const error = err as Error;
+      setTrackError(error.message);
+    }
+  };
+
   const labelA = lapA
     ? `${lapA.racerName} • ${lapA.lapNumber === 0 ? "Out" : `L${lapA.lapNumber}`}`
     : "Lap A";
@@ -278,6 +322,7 @@ export default function LapCompareStudio({
             <Track3DViewer
               lapA={lapA}
               lapB={lapB}
+              centerline={centerline}
               snapshot={snapshot}
               labelA={labelA}
               labelB={labelB}
@@ -509,6 +554,62 @@ export default function LapCompareStudio({
               ))}
             </div>
           )}
+
+          <div className="border-t border-zinc-800/80 pt-3.5 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400 flex items-center space-x-1.5">
+                <MapIcon size={12} className="text-cyan-400" />
+                <span>Circuit Track Layout</span>
+              </span>
+              {customTrack && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCustomTrack(null);
+                    setTrackError("");
+                  }}
+                  className="text-[9px] font-bold text-zinc-400 hover:text-rose-400 flex items-center space-x-1 cursor-pointer"
+                >
+                  <X size={11} />
+                  <span>Reset Auto</span>
+                </button>
+              )}
+            </div>
+
+            {customTrack ? (
+              <div className="bg-cyan-950/25 border border-cyan-500/40 rounded-xl px-3 py-2 text-[10px]">
+                <div className="font-bold text-cyan-300 truncate">
+                  {customTrack.name} ({customTrack.sourceFormat.toUpperCase()})
+                </div>
+                <div className="text-zinc-400 font-mono text-[9px]">
+                  {customTrack.points.length} GPS centerline points loaded
+                </div>
+              </div>
+            ) : (
+              <label className="block relative border border-dashed border-zinc-800 rounded-xl bg-zinc-950/50 p-3 hover:border-cyan-500/40 transition cursor-pointer text-center">
+                <input
+                  type="file"
+                  accept=".ztracks,.tkk,.kml,.gpx,.geojson,.json"
+                  onChange={handleTrackFileUpload}
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                />
+                <span className="text-[10px] text-zinc-300 font-bold block">
+                  Optional: Load Track File (.ztracks / .tkk / .kml / .gpx)
+                </span>
+                <span className="text-[9px] text-zinc-500 block mt-0.5">
+                  Uses the exact CSV GPS path by default. Upload a Race Studio
+                  .ztracks / .tkk or .kml track export if available.
+                </span>
+              </label>
+            )}
+
+            {trackError && (
+              <div className="text-[10px] text-amber-300 font-semibold bg-amber-950/30 border border-amber-700/60 rounded-xl p-2.5 flex items-start space-x-2">
+                <AlertCircle size={13} className="shrink-0 mt-0.5" />
+                <span>{trackError}</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {sessions.length > 0 && effectiveSelectionA && effectiveSelectionB && (

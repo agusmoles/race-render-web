@@ -1,20 +1,21 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   Camera,
   Compass,
   Crosshair,
-  Eye,
   Flame,
   Maximize2,
-  Mountain,
   RotateCcw,
 } from "lucide-react";
 import type {
   ComparisonSnapshot,
   LapPoint3D,
   ProcessedLap3D,
+  TrackCenterlinePoint,
 } from "@/utils/lap-comparison";
 
 type CameraMode = "orbit" | "chase-a" | "chase-b" | "top";
@@ -23,243 +24,27 @@ type LineColorMode = "lap" | "speed-delta";
 interface Track3DViewerProps {
   lapA: ProcessedLap3D;
   lapB: ProcessedLap3D;
+  centerline: TrackCenterlinePoint[];
   snapshot: ComparisonSnapshot;
   labelA: string;
   labelB: string;
 }
 
-interface Vec3 {
-  x: number;
-  y: number;
-  z: number;
+interface KartRig {
+  root: THREE.Group;
+  flPivot: THREE.Group;
+  frPivot: THREE.Group;
 }
 
-interface ScreenPt {
-  x: number;
-  y: number;
-  cz: number;
-}
-
-interface CameraState {
-  yaw: number;
-  pitch: number;
-  distance: number;
-  targetX: number;
-  targetY: number;
-  targetZ: number;
-}
-
-interface CameraBasis {
-  pos: Vec3;
-  right: Vec3;
-  up: Vec3;
-  forward: Vec3;
-  focalLen: number;
-  halfW: number;
-  halfH: number;
-}
-
-interface TrackStation {
-  x: number;
-  y: number;
-  z: number;
-  rightX: number;
-  rightZ: number;
-  curvature: number;
-  normDist: number;
-}
-
-interface TrackMeta {
-  centerX: number;
-  centerY: number;
-  centerZ: number;
-  minY: number;
-  radius: number;
-  minX: number;
-  maxX: number;
-  minZ: number;
-  maxZ: number;
-  key: string;
-}
-
-interface LapBRenderPoint {
-  x: number;
-  y: number;
-  z: number;
-  normDist: number;
-  speedDiff: number;
-}
-
-interface Poly3D {
-  verts: Vec3[];
-  fill: string;
-  stroke?: string;
-  lineWidth?: number;
-}
-
-interface RenderParams {
-  lapA: ProcessedLap3D;
-  lapB: ProcessedLap3D;
+interface LiveFrameState {
   snapshot: ComparisonSnapshot;
-  labelA: string;
-  labelB: string;
   cameraMode: CameraMode;
   followMidpoint: boolean;
-  colorMode: LineColorMode;
-  trackWidth: number;
-  elevationScale: number;
-  showElevationColumns: boolean;
-  trackMeta: TrackMeta;
-  trackStations: TrackStation[];
-  lapARenderPath: LapPoint3D[];
-  lapBRenderPath: LapBRenderPoint[];
+  labelA: string;
+  labelB: string;
 }
 
-const NEAR_PLANE = 0.45;
-const ELEVATION_OPTIONS = [1, 3, 5] as const;
-
-function normalizeVec3(v: Vec3): Vec3 {
-  const len = Math.hypot(v.x, v.y, v.z);
-  if (len < 1e-9) return { x: 0, y: 0, z: 1 };
-  return { x: v.x / len, y: v.y / len, z: v.z / len };
-}
-
-function crossVec3(a: Vec3, b: Vec3): Vec3 {
-  return {
-    x: a.y * b.z - a.z * b.y,
-    y: a.z * b.x - a.x * b.z,
-    z: a.x * b.y - a.y * b.x,
-  };
-}
-
-function dotVec3(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-function toCamSpace(p: Vec3, basis: CameraBasis): Vec3 {
-  const dx = p.x - basis.pos.x;
-  const dy = p.y - basis.pos.y;
-  const dz = p.z - basis.pos.z;
-  return {
-    x: dx * basis.right.x + dy * basis.right.y + dz * basis.right.z,
-    y: dx * basis.up.x + dy * basis.up.y + dz * basis.up.z,
-    z: dx * basis.forward.x + dy * basis.forward.y + dz * basis.forward.z,
-  };
-}
-
-function projectCamPt(c: Vec3, basis: CameraBasis): ScreenPt {
-  const invZ = basis.focalLen / c.z;
-  return {
-    x: basis.halfW + c.x * invZ,
-    y: basis.halfH - c.y * invZ,
-    cz: c.z,
-  };
-}
-
-function projectWorldPt(p: Vec3, basis: CameraBasis): ScreenPt | null {
-  const c = toCamSpace(p, basis);
-  if (c.z <= NEAR_PLANE) return null;
-  return projectCamPt(c, basis);
-}
-
-function clipSegmentToScreen(
-  a: Vec3,
-  b: Vec3,
-  basis: CameraBasis,
-): [ScreenPt, ScreenPt] | null {
-  let ca = toCamSpace(a, basis);
-  let cb = toCamSpace(b, basis);
-
-  if (ca.z <= NEAR_PLANE && cb.z <= NEAR_PLANE) return null;
-
-  if (ca.z <= NEAR_PLANE) {
-    const t = (NEAR_PLANE - ca.z) / (cb.z - ca.z);
-    ca = {
-      x: ca.x + (cb.x - ca.x) * t,
-      y: ca.y + (cb.y - ca.y) * t,
-      z: NEAR_PLANE,
-    };
-  } else if (cb.z <= NEAR_PLANE) {
-    const t = (NEAR_PLANE - cb.z) / (ca.z - cb.z);
-    cb = {
-      x: cb.x + (ca.x - cb.x) * t,
-      y: cb.y + (ca.y - cb.y) * t,
-      z: NEAR_PLANE,
-    };
-  }
-
-  return [projectCamPt(ca, basis), projectCamPt(cb, basis)];
-}
-
-function clipPolygonToScreen(
-  verts: Vec3[],
-  basis: CameraBasis,
-): { pts: ScreenPt[]; avgDepth: number } | null {
-  const camVerts = verts.map((v) => toCamSpace(v, basis));
-  const clipped: Vec3[] = [];
-  const count = camVerts.length;
-
-  for (let i = 0; i < count; i++) {
-    const curr = camVerts[i];
-    const next = camVerts[(i + 1) % count];
-    const currIn = curr.z >= NEAR_PLANE;
-    const nextIn = next.z >= NEAR_PLANE;
-
-    if (currIn && nextIn) {
-      clipped.push(next);
-    } else if (currIn && !nextIn) {
-      const t = (NEAR_PLANE - curr.z) / (next.z - curr.z);
-      clipped.push({
-        x: curr.x + (next.x - curr.x) * t,
-        y: curr.y + (next.y - curr.y) * t,
-        z: NEAR_PLANE,
-      });
-    } else if (!currIn && nextIn) {
-      const t = (NEAR_PLANE - curr.z) / (next.z - curr.z);
-      clipped.push({
-        x: curr.x + (next.x - curr.x) * t,
-        y: curr.y + (next.y - curr.y) * t,
-        z: NEAR_PLANE,
-      });
-      clipped.push(next);
-    }
-  }
-
-  if (clipped.length < 3) return null;
-
-  let depthSum = 0;
-  const pts: ScreenPt[] = new Array(clipped.length);
-  for (let i = 0; i < clipped.length; i++) {
-    depthSum += clipped[i].z;
-    pts[i] = projectCamPt(clipped[i], basis);
-  }
-
-  return { pts, avgDepth: depthSum / clipped.length };
-}
-
-function drawScreenPoly(
-  ctx: CanvasRenderingContext2D,
-  pts: ScreenPt[],
-  fill: string,
-  stroke?: string,
-  lineWidth = 1,
-) {
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) {
-    ctx.lineTo(pts[i].x, pts[i].y);
-  }
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-  if (stroke) {
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
-  }
-}
-
-function sampleLapSpeedAtNormDist(lap: ProcessedLap3D, normDist: number): number {
+function sampleSpeedAtNorm(lap: ProcessedLap3D, normDist: number): number {
   const pts = lap.points;
   if (pts.length === 0) return 0;
   if (normDist <= pts[0].normDist) return pts[0].speed;
@@ -281,686 +66,485 @@ function sampleLapSpeedAtNormDist(lap: ProcessedLap3D, normDist: number): number
   return a.speed + (b.speed - a.speed) * t;
 }
 
-function buildKartPolys(
-  pt: LapPoint3D,
-  elevScale: number,
-  primaryHex: string,
-  darkHex: string,
-): Poly3D[] {
-  const yaw = pt.headingRad;
-  const pitch = Math.max(-0.25, Math.min(0.25, -pt.slopeRad));
-  const roll = Math.max(-0.08, Math.min(0.08, pt.latAcc * 0.035));
-
-  const cosY = Math.cos(yaw);
-  const sinY = Math.sin(yaw);
-  const cosP = Math.cos(pitch);
-  const sinP = Math.sin(pitch);
-  const cosR = Math.cos(roll);
-  const sinR = Math.sin(roll);
-
-  const worldOriginY = pt.y * elevScale;
-
-  const xform = (lx: number, ly: number, lz: number): Vec3 => {
-    const rx = lx * cosR - ly * sinR;
-    const ry0 = lx * sinR + ly * cosR;
-    const rz0 = lz;
-
-    const py = ry0 * cosP - rz0 * sinP;
-    const pz = ry0 * sinP + rz0 * cosP;
-
-    return {
-      x: pt.x + rx * cosY + pz * sinY,
-      y: worldOriginY + py,
-      z: pt.z - rx * sinY + pz * cosY,
-    };
-  };
-
-  const makeBox = (
-    cx: number,
-    cy: number,
-    cz: number,
-    hx: number,
-    hy: number,
-    hz: number,
-    fillTop: string,
-    fillSide: string,
-    stroke: string,
-    steerRad = 0,
-  ): Poly3D[] => {
-    const cs = Math.cos(steerRad);
-    const sn = Math.sin(steerRad);
-    const localPt = (dx: number, dy: number, dz: number): Vec3 => {
-      const rx = dx * cs + dz * sn;
-      const rz = -dx * sn + dz * cs;
-      return xform(cx + rx, cy + dy, cz + rz);
-    };
-
-    const p000 = localPt(-hx, -hy, -hz);
-    const p100 = localPt(hx, -hy, -hz);
-    const p101 = localPt(hx, -hy, hz);
-    const p001 = localPt(-hx, -hy, hz);
-    const p010 = localPt(-hx, hy, -hz);
-    const p110 = localPt(hx, hy, -hz);
-    const p111 = localPt(hx, hy, hz);
-    const p011 = localPt(-hx, hy, hz);
-
-    return [
-      { verts: [p010, p110, p111, p011], fill: fillTop, stroke, lineWidth: 1 },
-      { verts: [p001, p101, p111, p011], fill: fillSide, stroke, lineWidth: 1 },
-      { verts: [p000, p100, p110, p010], fill: fillSide, stroke, lineWidth: 1 },
-      { verts: [p100, p101, p111, p110], fill: fillSide, stroke, lineWidth: 1 },
-      { verts: [p000, p001, p011, p010], fill: fillSide, stroke, lineWidth: 1 },
-    ];
-  };
-
-  const polys: Poly3D[] = [];
-  const steerRad = Math.max(-0.45, Math.min(0.45, (pt.steeringDeg * Math.PI) / 180));
-
-  polys.push(...makeBox(0, 0.14, 0.05, 0.36, 0.06, 0.95, "#27272a", "#18181b", "#52525b"));
-  polys.push(...makeBox(-0.48, 0.22, -0.05, 0.14, 0.11, 0.48, primaryHex, darkHex, "#09090b"));
-  polys.push(...makeBox(0.48, 0.22, -0.05, 0.14, 0.11, 0.48, primaryHex, darkHex, "#09090b"));
-  polys.push(...makeBox(0, 0.26, 0.88, 0.38, 0.09, 0.18, primaryHex, darkHex, "#09090b"));
-  polys.push(...makeBox(0, 0.46, 0.56, 0.15, 0.16, 0.24, primaryHex, darkHex, "#09090b"));
-  polys.push(...makeBox(0, 0.22, -0.92, 0.54, 0.09, 0.1, "#3f3f46", "#18181b", "#09090b"));
-  polys.push(...makeBox(0.28, 0.34, -0.45, 0.14, 0.14, 0.18, "#71717a", "#3f3f46", "#18181b"));
-
-  polys.push(...makeBox(-0.56, 0.18, 0.62, 0.11, 0.18, 0.19, "#18181b", "#09090b", "#3f3f46", steerRad));
-  polys.push(...makeBox(0.56, 0.18, 0.62, 0.11, 0.18, 0.19, "#18181b", "#09090b", "#3f3f46", steerRad));
-  polys.push(...makeBox(-0.62, 0.2, -0.64, 0.14, 0.2, 0.21, "#18181b", "#09090b", "#3f3f46"));
-  polys.push(...makeBox(0.62, 0.2, -0.64, 0.14, 0.2, 0.21, "#18181b", "#09090b", "#3f3f46"));
-
-  polys.push(...makeBox(0, 0.52, -0.14, 0.22, 0.22, 0.18, "#27272a", "#18181b", "#52525b"));
-  polys.push(...makeBox(0, 0.88, -0.1, 0.16, 0.16, 0.17, primaryHex, darkHex, "#ffffff"));
-
-  return polys;
+function disposeObject3D(root: THREE.Object3D) {
+  root.traverse((obj) => {
+    if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+      obj.geometry?.dispose();
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const mat of mats) {
+        if (!mat) continue;
+        if (mat instanceof THREE.MeshStandardMaterial) {
+          mat.map?.dispose();
+        } else if (mat instanceof THREE.MeshBasicMaterial) {
+          mat.map?.dispose();
+        }
+        mat.dispose();
+      }
+    }
+  });
 }
 
-function drawTrack3DScene(
-  ctx: CanvasRenderingContext2D,
-  viewport: { width: number; height: number; dpr: number },
-  cam: CameraState,
-  params: RenderParams,
-) {
-  const { width, height, dpr } = viewport;
-  const {
-    snapshot,
-    labelA,
-    labelB,
-    cameraMode,
-    followMidpoint,
-    colorMode,
-    trackWidth,
-    elevationScale,
-    showElevationColumns,
-    trackMeta,
-    trackStations,
-    lapARenderPath,
-    lapBRenderPath,
-  } = params;
+function createAsphaltTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    ctx.fillStyle = "#1c1c22";
+    ctx.fillRect(0, 0, 128, 128);
 
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
-  bgGrad.addColorStop(0, "#050507");
-  bgGrad.addColorStop(0.55, "#09090b");
-  bgGrad.addColorStop(1, "#111116");
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, width, height);
-
-  let camPos: Vec3;
-  let camTarget: Vec3;
-
-  if (cameraMode === "chase-a" || cameraMode === "chase-b") {
-    const focusPt = cameraMode === "chase-a" ? snapshot.pointA : snapshot.pointB;
-    const chaseDist = 11.5;
-    const chaseHeight = 4.2;
-    const lookAhead = 12;
-    const sinH = Math.sin(focusPt.headingRad);
-    const cosH = Math.cos(focusPt.headingRad);
-    const ptY = focusPt.y * elevationScale;
-
-    camPos = {
-      x: focusPt.x - sinH * chaseDist,
-      y: ptY + chaseHeight,
-      z: focusPt.z - cosH * chaseDist,
-    };
-    camTarget = {
-      x: focusPt.x + sinH * lookAhead,
-      y: ptY + 1.1,
-      z: focusPt.z + cosH * lookAhead,
-    };
-  } else {
-    if (cameraMode === "orbit" && followMidpoint) {
-      cam.targetX = (snapshot.pointA.x + snapshot.pointB.x) * 0.5;
-      cam.targetY =
-        (snapshot.pointA.y + snapshot.pointB.y) * 0.5 * elevationScale;
-      cam.targetZ = (snapshot.pointA.z + snapshot.pointB.z) * 0.5;
+    for (let i = 0; i < 650; i++) {
+      const x = (i * 73) % 128;
+      const y = (i * 41) % 128;
+      const shade = 24 + ((i * 19) % 18);
+      ctx.fillStyle = `rgb(${shade}, ${shade}, ${shade + 4})`;
+      ctx.fillRect(x, y, 2, 2);
     }
 
-    const pitch =
-      cameraMode === "top" ? 1.48 : Math.max(0.08, Math.min(1.48, cam.pitch));
-    camTarget = {
-      x: cam.targetX,
-      y: cam.targetY,
-      z: cam.targetZ,
-    };
-    camPos = {
-      x: camTarget.x + cam.distance * Math.cos(pitch) * Math.sin(cam.yaw),
-      y: camTarget.y + cam.distance * Math.sin(pitch),
-      z: camTarget.z + cam.distance * Math.cos(pitch) * Math.cos(cam.yaw),
-    };
+    ctx.fillStyle = "rgba(228, 228, 231, 0.85)";
+    ctx.fillRect(2, 0, 3, 128);
+    ctx.fillRect(123, 0, 3, 128);
+
+    ctx.fillStyle = "rgba(161, 161, 170, 0.25)";
+    ctx.fillRect(63, 12, 2, 42);
+    ctx.fillRect(63, 76, 2, 42);
   }
 
-  const worldUp: Vec3 = { x: 0, y: 1, z: 0 };
-  const forward = normalizeVec3({
-    x: camTarget.x - camPos.x,
-    y: camTarget.y - camPos.y,
-    z: camTarget.z - camPos.z,
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  return tex;
+}
+
+function createCheckerTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    const cols = 16;
+    const rows = 4;
+    const cw = canvas.width / cols;
+    const ch = canvas.height / rows;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        ctx.fillStyle = (r + c) % 2 === 0 ? "#f4f4f5" : "#18181b";
+        ctx.fillRect(c * cw, r * ch, cw, ch);
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+function createKartMesh(primaryHex: number, darkHex: number): KartRig {
+  const root = new THREE.Group();
+
+  const frameMat = new THREE.MeshStandardMaterial({
+    color: 0x27272a,
+    roughness: 0.45,
+    metalness: 0.65,
   });
-  const right = normalizeVec3(crossVec3(worldUp, forward));
-  const up = normalizeVec3(crossVec3(forward, right));
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: primaryHex,
+    emissive: darkHex,
+    emissiveIntensity: 0.25,
+    roughness: 0.32,
+    metalness: 0.25,
+  });
+  const tireMat = new THREE.MeshStandardMaterial({
+    color: 0x111114,
+    roughness: 0.88,
+    metalness: 0.08,
+  });
+  const rimMat = new THREE.MeshStandardMaterial({
+    color: 0xd4d4d8,
+    roughness: 0.3,
+    metalness: 0.85,
+  });
+  const suitMat = new THREE.MeshStandardMaterial({
+    color: 0x18181b,
+    roughness: 0.65,
+    metalness: 0.1,
+  });
+  const helmetMat = new THREE.MeshStandardMaterial({
+    color: primaryHex,
+    emissive: primaryHex,
+    emissiveIntensity: 0.28,
+    roughness: 0.18,
+    metalness: 0.45,
+  });
+  const visorMat = new THREE.MeshStandardMaterial({
+    color: 0x09090b,
+    roughness: 0.1,
+    metalness: 0.9,
+  });
 
-  const fovRad =
-    (cameraMode === "chase-a" || cameraMode === "chase-b" ? 58 : 48) *
-    (Math.PI / 180);
-  const focalLen = (height * 0.5) / Math.tan(fovRad * 0.5);
+  const floorpan = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.08, 1.82), frameMat);
+  floorpan.position.set(0, 0.12, 0.04);
+  root.add(floorpan);
 
-  const basis: CameraBasis = {
-    pos: camPos,
-    right,
-    up,
-    forward,
-    focalLen,
-    halfW: width * 0.5,
-    halfH: height * 0.5,
+  const podGeo = new THREE.BoxGeometry(0.24, 0.2, 0.92);
+  const leftPod = new THREE.Mesh(podGeo, bodyMat);
+  leftPod.position.set(0.42, 0.2, -0.02);
+  root.add(leftPod);
+
+  const rightPod = new THREE.Mesh(podGeo, bodyMat);
+  rightPod.position.set(-0.42, 0.2, -0.02);
+  root.add(rightPod);
+
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.84, 0.16, 0.32), bodyMat);
+  nose.position.set(0, 0.2, 0.86);
+  root.add(nose);
+
+  const fairing = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.3, 0.44), bodyMat);
+  fairing.position.set(0, 0.4, 0.56);
+  fairing.rotation.x = 0.38;
+  root.add(fairing);
+
+  const steeringWheel = new THREE.Mesh(
+    new THREE.TorusGeometry(0.11, 0.02, 8, 16),
+    frameMat,
+  );
+  steeringWheel.position.set(0, 0.5, 0.3);
+  steeringWheel.rotation.x = -0.45;
+  root.add(steeringWheel);
+
+  const rearBumper = new THREE.Mesh(new THREE.BoxGeometry(1.12, 0.16, 0.16), frameMat);
+  rearBumper.position.set(0, 0.2, -0.88);
+  root.add(rearBumper);
+
+  const engine = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.28, 0.32), rimMat);
+  engine.position.set(-0.28, 0.3, -0.44);
+  root.add(engine);
+
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.38, 0.32), suitMat);
+  seat.position.set(0, 0.34, -0.2);
+  seat.rotation.x = -0.22;
+  root.add(seat);
+
+  const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.16, 0.42, 12), suitMat);
+  torso.position.set(0, 0.54, -0.14);
+  torso.rotation.x = 0.14;
+  root.add(torso);
+
+  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.17, 16, 14), helmetMat);
+  helmet.position.set(0, 0.86, -0.08);
+  root.add(helmet);
+
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 0.14), visorMat);
+  visor.position.set(0, 0.87, 0.04);
+  root.add(visor);
+
+  const makeWheel = (radius: number, width: number) => {
+    const group = new THREE.Group();
+    const tire = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius, radius, width, 16),
+      tireMat,
+    );
+    tire.rotation.z = Math.PI / 2;
+    group.add(tire);
+
+    const hub = new THREE.Mesh(
+      new THREE.CylinderGeometry(radius * 0.56, radius * 0.56, width + 0.015, 12),
+      rimMat,
+    );
+    hub.rotation.z = Math.PI / 2;
+    group.add(hub);
+    return group;
   };
 
-  const gridY = trackMeta.minY * elevationScale - 0.6;
-  const gridStep = trackMeta.radius > 220 ? 50 : 25;
-  const minGX = Math.floor((trackMeta.minX - 60) / gridStep) * gridStep;
-  const maxGX = Math.ceil((trackMeta.maxX + 60) / gridStep) * gridStep;
-  const minGZ = Math.floor((trackMeta.minZ - 60) / gridStep) * gridStep;
-  const maxGZ = Math.ceil((trackMeta.maxZ + 60) / gridStep) * gridStep;
+  const flPivot = new THREE.Group();
+  flPivot.position.set(0.54, 0.16, 0.62);
+  flPivot.add(makeWheel(0.16, 0.16));
+  root.add(flPivot);
 
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(63, 63, 70, 0.28)";
-  ctx.beginPath();
-  for (let gx = minGX; gx <= maxGX; gx += gridStep) {
-    const seg = clipSegmentToScreen(
-      { x: gx, y: gridY, z: minGZ },
-      { x: gx, y: gridY, z: maxGZ },
-      basis,
-    );
-    if (seg) {
-      ctx.moveTo(seg[0].x, seg[0].y);
-      ctx.lineTo(seg[1].x, seg[1].y);
-    }
-  }
-  for (let gz = minGZ; gz <= maxGZ; gz += gridStep) {
-    const seg = clipSegmentToScreen(
-      { x: minGX, y: gridY, z: gz },
-      { x: maxGX, y: gridY, z: gz },
-      basis,
-    );
-    if (seg) {
-      ctx.moveTo(seg[0].x, seg[0].y);
-      ctx.lineTo(seg[1].x, seg[1].y);
-    }
-  }
-  ctx.stroke();
+  const frPivot = new THREE.Group();
+  frPivot.position.set(-0.54, 0.16, 0.62);
+  frPivot.add(makeWheel(0.16, 0.16));
+  root.add(frPivot);
+
+  const rlWheel = makeWheel(0.18, 0.22);
+  rlWheel.position.set(0.58, 0.18, -0.62);
+  root.add(rlWheel);
+
+  const rrWheel = makeWheel(0.18, 0.22);
+  rrWheel.position.set(-0.58, 0.18, -0.62);
+  root.add(rrWheel);
+
+  return { root, flPivot, frPivot };
+}
+
+function buildTrackAndLinesGroup(
+  centerline: TrackCenterlinePoint[],
+  lapA: ProcessedLap3D,
+  lapB: ProcessedLap3D,
+  trackWidth: number,
+  colorMode: LineColorMode,
+): THREE.Group {
+  const group = new THREE.Group();
+  if (centerline.length < 4) return group;
 
   const halfW = trackWidth * 0.5;
-  const kerbWidth = 0.85;
-  const ribbonItems: {
-    pts: ScreenPt[];
-    depth: number;
-    fill: string;
-    stroke?: string;
-  }[] = [];
+  const roadVerts: number[] = [];
+  const roadUvs: number[] = [];
+  const roadIndices: number[] = [];
 
-  for (let i = 0; i < trackStations.length - 1; i++) {
-    const s0 = trackStations[i];
-    const s1 = trackStations[i + 1];
-    const y0 = s0.y * elevationScale;
-    const y1 = s1.y * elevationScale;
+  let totalArc = 0;
+  for (let i = 0; i < centerline.length; i++) {
+    const s = centerline[i];
+    if (i > 0) {
+      const prev = centerline[i - 1];
+      totalArc += Math.hypot(s.x - prev.x, s.z - prev.z);
+    }
 
-    const l0: Vec3 = {
-      x: s0.x - s0.rightX * halfW,
-      y: y0,
-      z: s0.z - s0.rightZ * halfW,
-    };
-    const r0: Vec3 = {
-      x: s0.x + s0.rightX * halfW,
-      y: y0,
-      z: s0.z + s0.rightZ * halfW,
-    };
-    const r1: Vec3 = {
-      x: s1.x + s1.rightX * halfW,
-      y: y1,
-      z: s1.z + s1.rightZ * halfW,
-    };
-    const l1: Vec3 = {
-      x: s1.x - s1.rightX * halfW,
-      y: y1,
-      z: s1.z - s1.rightZ * halfW,
-    };
+    const leftX = s.x - s.rightX * halfW;
+    const leftZ = s.z - s.rightZ * halfW;
+    const rightX = s.x + s.rightX * halfW;
+    const rightZ = s.z + s.rightZ * halfW;
 
-    const clipped = clipPolygonToScreen([l0, r0, r1, l1], basis);
-    if (clipped) {
-      const slopeShade = Math.max(-14, Math.min(14, Math.round((y1 - y0) * 6)));
-      const baseL = 24 + slopeShade;
-      ribbonItems.push({
-        pts: clipped.pts,
-        depth: clipped.avgDepth,
-        fill: `rgb(${baseL}, ${baseL + 1}, ${baseL + 5})`,
-        stroke: "rgba(63, 63, 70, 0.25)",
+    roadVerts.push(leftX, 0, leftZ, rightX, 0, rightZ);
+    const vCoord = totalArc * 0.08;
+    roadUvs.push(0, vCoord, 1, vCoord);
+
+    if (i < centerline.length - 1) {
+      const row = i * 2;
+      roadIndices.push(row, row + 1, row + 2);
+      roadIndices.push(row + 1, row + 3, row + 2);
+    }
+  }
+
+  const roadGeo = new THREE.BufferGeometry();
+  roadGeo.setAttribute("position", new THREE.Float32BufferAttribute(roadVerts, 3));
+  roadGeo.setAttribute("uv", new THREE.Float32BufferAttribute(roadUvs, 2));
+  roadGeo.setIndex(roadIndices);
+  roadGeo.computeVertexNormals();
+
+  const asphaltTex = createAsphaltTexture();
+  const roadMat = new THREE.MeshStandardMaterial({
+    map: asphaltTex,
+    roughness: 0.85,
+    metalness: 0.1,
+    side: THREE.DoubleSide,
+  });
+  group.add(new THREE.Mesh(roadGeo, roadMat));
+
+  // Raised corner kerbs on curved segments
+  const kerbVerts: number[] = [];
+  const kerbColors: number[] = [];
+  const kerbIndices: number[] = [];
+  let kerbVertexOffset = 0;
+
+  for (let i = 0; i < centerline.length - 1; i++) {
+    const s0 = centerline[i];
+    const s1 = centerline[i + 1];
+    if (s0.curvature < 0.018) continue;
+
+    const isRed = Math.floor(i / 2) % 2 === 0;
+    const cr = isRed ? 0.95 : 0.94;
+    const cg = isRed ? 0.24 : 0.94;
+    const cb = isRed ? 0.37 : 0.96;
+
+    for (const side of [-1, 1]) {
+      const innerOff = halfW * side;
+      const outerOff = (halfW + 0.85) * side;
+
+      const p0x = s0.x + s0.rightX * innerOff;
+      const p0z = s0.z + s0.rightZ * innerOff;
+      const p1x = s0.x + s0.rightX * outerOff;
+      const p1z = s0.z + s0.rightZ * outerOff;
+      const p2x = s1.x + s1.rightX * outerOff;
+      const p2z = s1.z + s1.rightZ * outerOff;
+      const p3x = s1.x + s1.rightX * innerOff;
+      const p3z = s1.z + s1.rightZ * innerOff;
+
+      kerbVerts.push(
+        p0x, 0.02, p0z,
+        p1x, 0.06, p1z,
+        p2x, 0.06, p2z,
+        p3x, 0.02, p3z,
+      );
+      for (let k = 0; k < 4; k++) kerbColors.push(cr, cg, cb);
+      kerbIndices.push(
+        kerbVertexOffset,
+        kerbVertexOffset + 1,
+        kerbVertexOffset + 2,
+        kerbVertexOffset,
+        kerbVertexOffset + 2,
+        kerbVertexOffset + 3,
+      );
+      kerbVertexOffset += 4;
+    }
+  }
+
+  if (kerbVerts.length > 0) {
+    const kerbGeo = new THREE.BufferGeometry();
+    kerbGeo.setAttribute("position", new THREE.Float32BufferAttribute(kerbVerts, 3));
+    kerbGeo.setAttribute("color", new THREE.Float32BufferAttribute(kerbColors, 3));
+    kerbGeo.setIndex(kerbIndices);
+    kerbGeo.computeVertexNormals();
+    const kerbMat = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.6,
+      metalness: 0.05,
+      side: THREE.DoubleSide,
+    });
+    group.add(new THREE.Mesh(kerbGeo, kerbMat));
+  }
+
+  // Start / Finish Gantry
+  const sf = centerline[0];
+  const gantrySpan = trackWidth + 1.4;
+  const gantryHeight = 3.4;
+  const gantryGroup = new THREE.Group();
+  gantryGroup.position.set(sf.x, 0, sf.z);
+  gantryGroup.rotation.y = Math.atan2(sf.rightZ, -sf.rightX);
+
+  const postMat = new THREE.MeshStandardMaterial({
+    color: 0x71717a,
+    metalness: 0.75,
+    roughness: 0.35,
+  });
+  const postGeo = new THREE.BoxGeometry(0.24, gantryHeight, 0.24);
+  const leftPost = new THREE.Mesh(postGeo, postMat);
+  leftPost.position.set(-gantrySpan * 0.5, gantryHeight * 0.5, 0);
+  gantryGroup.add(leftPost);
+
+  const rightPost = new THREE.Mesh(postGeo, postMat);
+  rightPost.position.set(gantrySpan * 0.5, gantryHeight * 0.5, 0);
+  gantryGroup.add(rightPost);
+
+  const checkerTex = createCheckerTexture();
+  const banner = new THREE.Mesh(
+    new THREE.BoxGeometry(gantrySpan + 0.3, 0.7, 0.28),
+    new THREE.MeshStandardMaterial({ map: checkerTex, roughness: 0.5 }),
+  );
+  banner.position.set(0, gantryHeight - 0.25, 0);
+  gantryGroup.add(banner);
+
+  const sfStrip = new THREE.Mesh(
+    new THREE.PlaneGeometry(trackWidth, 0.55),
+    new THREE.MeshBasicMaterial({ map: checkerTex, side: THREE.DoubleSide }),
+  );
+  sfStrip.rotation.x = -Math.PI / 2;
+  sfStrip.position.set(0, 0.03, 0);
+  gantryGroup.add(sfStrip);
+  group.add(gantryGroup);
+
+  // Racing Line Tubes (strictly planar yLift, never force-closing open laps)
+  const buildLapCurve = (lap: ProcessedLap3D, yLift: number) => {
+    const pts = lap.points;
+    const step = Math.max(1, Math.floor(pts.length / 320));
+    const vecs: THREE.Vector3[] = [];
+    for (let i = 0; i < pts.length; i += step) {
+      vecs.push(new THREE.Vector3(pts[i].x, yLift, pts[i].z));
+    }
+    const last = pts[pts.length - 1];
+    if (last && vecs[vecs.length - 1].distanceTo(new THREE.Vector3(last.x, yLift, last.z)) > 0.1) {
+      vecs.push(new THREE.Vector3(last.x, yLift, last.z));
+    }
+    const isClosed =
+      vecs.length >= 4 && vecs[0].distanceTo(vecs[vecs.length - 1]) < 35;
+    return {
+      curve: new THREE.CatmullRomCurve3(vecs, isClosed, "catmullrom", 0.3),
+      isClosed,
+    };
+  };
+
+  if (lapA.points.length >= 6) {
+    const { curve, isClosed } = buildLapCurve(lapA, 0.07);
+    const tubeAGeo = new THREE.TubeGeometry(curve, 360, 0.1, 6, isClosed);
+    const tubeAMat = new THREE.MeshStandardMaterial({
+      color: 0x22d3ee,
+      emissive: 0x0891b2,
+      emissiveIntensity: 0.55,
+      roughness: 0.3,
+    });
+    group.add(new THREE.Mesh(tubeAGeo, tubeAMat));
+  }
+
+  if (lapB.points.length >= 6) {
+    const { curve, isClosed } = buildLapCurve(lapB, 0.09);
+    const tubularSegs = 360;
+    const radialSegs = 6;
+    const tubeBGeo = new THREE.TubeGeometry(curve, tubularSegs, 0.11, radialSegs, isClosed);
+
+    if (colorMode === "speed-delta") {
+      const posAttr = tubeBGeo.attributes.position;
+      const colors = new Float32Array(posAttr.count * 3);
+      const ringSize = radialSegs + 1;
+      const faster = new THREE.Color(0x10b981);
+      const equal = new THREE.Color(0xfacc15);
+      const slower = new THREE.Color(0xf43f5e);
+
+      for (let s = 0; s <= tubularSegs; s++) {
+        const u = s / tubularSegs;
+        const spdB = sampleSpeedAtNorm(lapB, u);
+        const spdA = sampleSpeedAtNorm(lapA, u);
+        const diff = spdB - spdA;
+        const c = diff > 1.2 ? faster : diff < -1.2 ? slower : equal;
+
+        for (let r = 0; r < ringSize; r++) {
+          const idx = (s * ringSize + r) * 3;
+          if (idx + 2 < colors.length) {
+            colors[idx] = c.r;
+            colors[idx + 1] = c.g;
+            colors[idx + 2] = c.b;
+          }
+        }
+      }
+      tubeBGeo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+      const tubeBMat = new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        emissive: 0x18181b,
+        emissiveIntensity: 0.25,
+        roughness: 0.35,
       });
-    }
-
-    if (showElevationColumns && i % 4 === 0) {
-      const colSeg = clipSegmentToScreen(
-        { x: s0.x, y: y0, z: s0.z },
-        { x: s0.x, y: gridY, z: s0.z },
-        basis,
-      );
-      if (colSeg) {
-        ctx.strokeStyle = "rgba(82, 82, 91, 0.35)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(colSeg[0].x, colSeg[0].y);
-        ctx.lineTo(colSeg[1].x, colSeg[1].y);
-        ctx.stroke();
-      }
-    }
-
-    if (s0.curvature > 0.025) {
-      const kerbColor =
-        i % 2 === 0 ? "rgba(244, 63, 94, 0.72)" : "rgba(244, 244, 245, 0.75)";
-      for (const side of [-1, 1]) {
-        const innerOff = halfW * side;
-        const outerOff = (halfW + kerbWidth) * side;
-        const k0: Vec3 = {
-          x: s0.x + s0.rightX * innerOff,
-          y: y0 + 0.03,
-          z: s0.z + s0.rightZ * innerOff,
-        };
-        const k1: Vec3 = {
-          x: s0.x + s0.rightX * outerOff,
-          y: y0 + 0.05,
-          z: s0.z + s0.rightZ * outerOff,
-        };
-        const k2: Vec3 = {
-          x: s1.x + s1.rightX * outerOff,
-          y: y1 + 0.05,
-          z: s1.z + s1.rightZ * outerOff,
-        };
-        const k3: Vec3 = {
-          x: s1.x + s1.rightX * innerOff,
-          y: y1 + 0.03,
-          z: s1.z + s1.rightZ * innerOff,
-        };
-        const kClip = clipPolygonToScreen([k0, k1, k2, k3], basis);
-        if (kClip) {
-          ribbonItems.push({
-            pts: kClip.pts,
-            depth: kClip.avgDepth - 0.05,
-            fill: kerbColor,
-          });
-        }
-      }
+      group.add(new THREE.Mesh(tubeBGeo, tubeBMat));
+    } else {
+      const tubeBMat = new THREE.MeshStandardMaterial({
+        color: 0xf43f5e,
+        emissive: 0x9f1239,
+        emissiveIntensity: 0.5,
+        roughness: 0.3,
+      });
+      group.add(new THREE.Mesh(tubeBGeo, tubeBMat));
     }
   }
 
-  ribbonItems.sort((a, b) => b.depth - a.depth);
-  for (const item of ribbonItems) {
-    drawScreenPoly(ctx, item.pts, item.fill, item.stroke, 0.8);
-  }
-
-  for (const side of [-1, 1]) {
-    ctx.beginPath();
-    for (let i = 0; i < trackStations.length - 1; i++) {
-      const s0 = trackStations[i];
-      const s1 = trackStations[i + 1];
-      const seg = clipSegmentToScreen(
-        {
-          x: s0.x + s0.rightX * halfW * side,
-          y: s0.y * elevationScale + 0.02,
-          z: s0.z + s0.rightZ * halfW * side,
-        },
-        {
-          x: s1.x + s1.rightX * halfW * side,
-          y: s1.y * elevationScale + 0.02,
-          z: s1.z + s1.rightZ * halfW * side,
-        },
-        basis,
-      );
-      if (seg) {
-        ctx.moveTo(seg[0].x, seg[0].y);
-        ctx.lineTo(seg[1].x, seg[1].y);
-      }
-    }
-    ctx.strokeStyle = "rgba(161, 161, 170, 0.45)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-  }
-
-  if (trackStations.length > 0) {
-    const sf = trackStations[0];
-    const sfY = sf.y * elevationScale;
-    const postL: Vec3 = {
-      x: sf.x - sf.rightX * (halfW + 0.4),
-      y: sfY,
-      z: sf.z - sf.rightZ * (halfW + 0.4),
-    };
-    const postR: Vec3 = {
-      x: sf.x + sf.rightX * (halfW + 0.4),
-      y: sfY,
-      z: sf.z + sf.rightZ * (halfW + 0.4),
-    };
-    const gantryH = 3.2;
-
-    const leftPole = clipSegmentToScreen(
-      postL,
-      { ...postL, y: sfY + gantryH },
-      basis,
-    );
-    const rightPole = clipSegmentToScreen(
-      postR,
-      { ...postR, y: sfY + gantryH },
-      basis,
-    );
-    const sfLine = clipSegmentToScreen(
-      { x: sf.x - sf.rightX * halfW, y: sfY + 0.04, z: sf.z - sf.rightZ * halfW },
-      { x: sf.x + sf.rightX * halfW, y: sfY + 0.04, z: sf.z + sf.rightZ * halfW },
-      basis,
-    );
-    const banner = clipPolygonToScreen(
-      [
-        { ...postL, y: sfY + gantryH - 0.55 },
-        { ...postR, y: sfY + gantryH - 0.55 },
-        { ...postR, y: sfY + gantryH },
-        { ...postL, y: sfY + gantryH },
-      ],
-      basis,
-    );
-
-    if (sfLine) {
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(sfLine[0].x, sfLine[0].y);
-      ctx.lineTo(sfLine[1].x, sfLine[1].y);
-      ctx.stroke();
-    }
-    ctx.strokeStyle = "#a1a1aa";
-    ctx.lineWidth = 2.5;
-    for (const pole of [leftPole, rightPole]) {
-      if (pole) {
-        ctx.beginPath();
-        ctx.moveTo(pole[0].x, pole[0].y);
-        ctx.lineTo(pole[1].x, pole[1].y);
-        ctx.stroke();
-      }
-    }
-    if (banner) {
-      drawScreenPoly(ctx, banner.pts, "rgba(24, 24, 27, 0.9)", "#e4e4e7", 1.2);
-    }
-  }
-
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-
-  for (let i = 0; i < lapARenderPath.length - 1; i++) {
-    const p0 = lapARenderPath[i];
-    const p1 = lapARenderPath[i + 1];
-    const seg = clipSegmentToScreen(
-      { x: p0.x, y: p0.y * elevationScale + 0.08, z: p0.z },
-      { x: p1.x, y: p1.y * elevationScale + 0.08, z: p1.z },
-      basis,
-    );
-    if (seg) {
-      const isTail =
-        p1.normDist <= snapshot.pointA.normDist &&
-        p1.normDist >= snapshot.pointA.normDist - 0.06;
-      ctx.strokeStyle = isTail
-        ? "rgba(34, 211, 238, 0.95)"
-        : "rgba(34, 211, 238, 0.45)";
-      ctx.lineWidth = isTail ? 3.8 : 2;
-      ctx.beginPath();
-      ctx.moveTo(seg[0].x, seg[0].y);
-      ctx.lineTo(seg[1].x, seg[1].y);
-      ctx.stroke();
-    }
-  }
-
-  for (let i = 0; i < lapBRenderPath.length - 1; i++) {
-    const p0 = lapBRenderPath[i];
-    const p1 = lapBRenderPath[i + 1];
-    const seg = clipSegmentToScreen(
-      { x: p0.x, y: p0.y * elevationScale + 0.11, z: p0.z },
-      { x: p1.x, y: p1.y * elevationScale + 0.11, z: p1.z },
-      basis,
-    );
-    if (seg) {
-      const isTail =
-        p1.normDist <= snapshot.pointB.normDist &&
-        p1.normDist >= snapshot.pointB.normDist - 0.06;
-      let stroke = isTail
-        ? "rgba(244, 63, 94, 0.98)"
-        : "rgba(244, 63, 94, 0.65)";
-
-      if (colorMode === "speed-delta") {
-        if (p1.speedDiff > 1.2) {
-          stroke = isTail ? "rgba(16, 185, 129, 0.98)" : "rgba(16, 185, 129, 0.78)";
-        } else if (p1.speedDiff < -1.2) {
-          stroke = isTail ? "rgba(244, 63, 94, 0.98)" : "rgba(244, 63, 94, 0.78)";
-        } else {
-          stroke = isTail ? "rgba(250, 204, 21, 0.95)" : "rgba(250, 204, 21, 0.7)";
-        }
-      }
-
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = isTail ? 3.8 : 2.3;
-      ctx.beginPath();
-      ctx.moveTo(seg[0].x, seg[0].y);
-      ctx.lineTo(seg[1].x, seg[1].y);
-      ctx.stroke();
-    }
-  }
-
-  const linkSeg = clipSegmentToScreen(
-    {
-      x: snapshot.pointA.x,
-      y: snapshot.pointA.y * elevationScale + 0.35,
-      z: snapshot.pointA.z,
-    },
-    {
-      x: snapshot.pointB.x,
-      y: snapshot.pointB.y * elevationScale + 0.35,
-      z: snapshot.pointB.z,
-    },
-    basis,
-  );
-  if (linkSeg) {
-    ctx.save();
-    ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = "rgba(244, 244, 245, 0.55)";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(linkSeg[0].x, linkSeg[0].y);
-    ctx.lineTo(linkSeg[1].x, linkSeg[1].y);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  const kartADepth = dotVec3(
-    {
-      x: snapshot.pointA.x - camPos.x,
-      y: snapshot.pointA.y * elevationScale - camPos.y,
-      z: snapshot.pointA.z - camPos.z,
-    },
-    forward,
-  );
-  const kartBDepth = dotVec3(
-    {
-      x: snapshot.pointB.x - camPos.x,
-      y: snapshot.pointB.y * elevationScale - camPos.y,
-      z: snapshot.pointB.z - camPos.z,
-    },
-    forward,
-  );
-
-  const kartItems = [
-    {
-      depth: kartADepth,
-      pt: snapshot.pointA,
-      primary: "#22d3ee",
-      dark: "#0891b2",
-      tag: `A • ${Math.round(snapshot.pointA.speed)} km/h`,
-      subTag: labelA,
-    },
-    {
-      depth: kartBDepth,
-      pt: snapshot.pointB,
-      primary: "#f43f5e",
-      dark: "#be123c",
-      tag: `B • ${Math.round(snapshot.pointB.speed)} km/h`,
-      subTag: `${labelB} (${snapshot.timeDelta >= 0 ? "+" : ""}${snapshot.timeDelta.toFixed(3)}s)`,
-    },
-  ].sort((a, b) => b.depth - a.depth);
-
-  for (const kart of kartItems) {
-    const polys = buildKartPolys(kart.pt, elevationScale, kart.primary, kart.dark);
-    const projectedPolys: {
-      pts: ScreenPt[];
-      avgDepth: number;
-      fill: string;
-      stroke?: string;
-      lineWidth?: number;
-    }[] = [];
-
-    for (const poly of polys) {
-      const res = clipPolygonToScreen(poly.verts, basis);
-      if (res) {
-        projectedPolys.push({
-          pts: res.pts,
-          avgDepth: res.avgDepth,
-          fill: poly.fill,
-          stroke: poly.stroke,
-          lineWidth: poly.lineWidth,
-        });
-      }
-    }
-
-    projectedPolys.sort((a, b) => b.avgDepth - a.avgDepth);
-    for (const p of projectedPolys) {
-      drawScreenPoly(ctx, p.pts, p.fill, p.stroke, p.lineWidth);
-    }
-
-    const tagWorld: Vec3 = {
-      x: kart.pt.x,
-      y: kart.pt.y * elevationScale + 1.45,
-      z: kart.pt.z,
-    };
-    const tagScreen = projectWorldPt(tagWorld, basis);
-    if (tagScreen && tagScreen.x > -100 && tagScreen.x < width + 100) {
-      ctx.font = "700 10px Inter, sans-serif";
-      const mainW = ctx.measureText(kart.tag).width;
-      ctx.font = "700 9px Orbitron, monospace";
-      const subW = ctx.measureText(kart.subTag).width;
-      const boxW = Math.max(mainW, subW) + 18;
-      const boxH = 32;
-      const bx = tagScreen.x - boxW * 0.5;
-      const by = tagScreen.y - boxH - 8;
-
-      ctx.strokeStyle = kart.primary;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(tagScreen.x, tagScreen.y + 4);
-      ctx.lineTo(tagScreen.x, by + boxH);
-      ctx.stroke();
-
-      ctx.fillStyle = "rgba(9, 9, 11, 0.88)";
-      ctx.strokeStyle = kart.primary;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.roundRect(bx, by, boxW, boxH, 7);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = "#f4f4f5";
-      ctx.font = "700 10px Inter, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(kart.tag, tagScreen.x, by + 13);
-
-      ctx.fillStyle = kart.primary;
-      ctx.font = "700 9px Orbitron, monospace";
-      ctx.fillText(kart.subTag, tagScreen.x, by + 25);
-    }
-  }
-
-  const compX = width - 38;
-  const compY = height - 38;
-  const northDx = dotVec3({ x: 0, y: 0, z: 1 }, right);
-  const northDy = -dotVec3({ x: 0, y: 0, z: 1 }, up);
-  const compLen = Math.hypot(northDx, northDy) || 1;
-  const nx = (northDx / compLen) * 14;
-  const ny = (northDy / compLen) * 14;
-
-  ctx.fillStyle = "rgba(9, 9, 11, 0.78)";
-  ctx.strokeStyle = "rgba(63, 63, 70, 0.8)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.arc(compX, compY, 20, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.strokeStyle = "#22d3ee";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(compX, compY);
-  ctx.lineTo(compX + nx, compY + ny);
-  ctx.stroke();
-
-  ctx.fillStyle = "#22d3ee";
-  ctx.font = "900 9px Inter, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText("N", compX + nx * 1.35, compY + ny * 1.35);
-  ctx.textBaseline = "alphabetic";
+  return group;
 }
 
 export default function Track3DViewer({
   lapA,
   lapB,
+  centerline,
   snapshot,
   labelA,
   labelB,
 }: Track3DViewerProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mountRef = useRef<HTMLDivElement>(null);
+  const badgeARef = useRef<HTMLDivElement>(null);
+  const badgeBRef = useRef<HTMLDivElement>(null);
 
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [followMidpoint, setFollowMidpoint] = useState(false);
   const [colorMode, setColorMode] = useState<LineColorMode>("lap");
   const [trackWidth, setTrackWidth] = useState(9);
-  const [elevationScale, setElevationScale] = useState<(typeof ELEVATION_OPTIONS)[number]>(3);
-  const [showElevationColumns, setShowElevationColumns] = useState(false);
 
-  const trackMeta = useMemo<TrackMeta>(() => {
-    const allPts = [...lapA.points, ...lapB.points];
+  const trackMeta = useMemo(() => {
+    const pts = centerline.length > 0 ? centerline : lapA.points;
     let minX = Infinity;
     let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
     let minZ = Infinity;
     let maxZ = -Infinity;
 
-    for (const p of allPts) {
+    for (const p of pts) {
       if (p.x < minX) minX = p.x;
       if (p.x > maxX) maxX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
       if (p.z < minZ) minZ = p.z;
       if (p.z > maxZ) maxZ = p.z;
     }
@@ -968,308 +552,330 @@ export default function Track3DViewer({
     if (!Number.isFinite(minX)) {
       return {
         centerX: 0,
-        centerY: 0,
         centerZ: 0,
-        minY: 0,
         radius: 100,
-        minX: -100,
-        maxX: 100,
-        minZ: -100,
-        maxZ: 100,
         key: "empty",
       };
     }
 
-    const centerX = (minX + maxX) / 2;
-    const centerY = (minY + maxY) / 2;
-    const centerZ = (minZ + maxZ) / 2;
-    const radius = Math.max(40, Math.hypot(maxX - minX, maxZ - minZ) * 0.55);
-
     return {
-      centerX,
-      centerY,
-      centerZ,
-      minY,
-      radius,
-      minX,
-      maxX,
-      minZ,
-      maxZ,
-      key: `${lapA.sessionId}_${lapA.lapNumber}_${lapB.sessionId}_${lapB.lapNumber}`,
+      centerX: (minX + maxX) * 0.5,
+      centerZ: (minZ + maxZ) * 0.5,
+      radius: Math.max(40, Math.hypot(maxX - minX, maxZ - minZ) * 0.55),
+      key: `${lapA.sessionId}_${lapA.lapNumber}_${lapB.sessionId}_${lapB.lapNumber}_${centerline.length}`,
     };
-  }, [lapA, lapB]);
+  }, [centerline, lapA, lapB]);
 
-  const trackStations = useMemo<TrackStation[]>(() => {
-    const pts = lapA.points;
-    if (pts.length < 4) return [];
-
-    const maxStations = 260;
-    const step = Math.max(1, Math.floor(pts.length / maxStations));
-    const sampled: LapPoint3D[] = [];
-    for (let i = 0; i < pts.length; i += step) {
-      sampled.push(pts[i]);
-    }
-    if (sampled[sampled.length - 1] !== pts[pts.length - 1]) {
-      sampled.push(pts[pts.length - 1]);
-    }
-
-    return sampled.map((pt, idx) => {
-      const prev = sampled[(idx - 1 + sampled.length) % sampled.length];
-      const next = sampled[(idx + 1) % sampled.length];
-      let dH = next.headingRad - prev.headingRad;
-      while (dH > Math.PI) dH -= Math.PI * 2;
-      while (dH < -Math.PI) dH += Math.PI * 2;
-      const ds = Math.max(1, Math.hypot(next.x - prev.x, next.z - prev.z));
-
-      return {
-        x: pt.x,
-        y: pt.y,
-        z: pt.z,
-        rightX: Math.cos(pt.headingRad),
-        rightZ: -Math.sin(pt.headingRad),
-        curvature: Math.abs(dH) / ds,
-        normDist: pt.normDist,
-      };
-    });
-  }, [lapA.points]);
-
-  const lapBRenderPath = useMemo<LapBRenderPoint[]>(() => {
-    const pts = lapB.points;
-    const maxPts = 400;
-    const step = Math.max(1, Math.floor(pts.length / maxPts));
-    const out: LapBRenderPoint[] = [];
-
-    for (let i = 0; i < pts.length; i += step) {
-      const pt = pts[i];
-      const speedA = sampleLapSpeedAtNormDist(lapA, pt.normDist);
-      out.push({
-        x: pt.x,
-        y: pt.y,
-        z: pt.z,
-        normDist: pt.normDist,
-        speedDiff: pt.speed - speedA,
-      });
-    }
-    const last = pts[pts.length - 1];
-    if (last && (out.length === 0 || out[out.length - 1].normDist < 0.999)) {
-      const speedA = sampleLapSpeedAtNormDist(lapA, last.normDist);
-      out.push({
-        x: last.x,
-        y: last.y,
-        z: last.z,
-        normDist: last.normDist,
-        speedDiff: last.speed - speedA,
-      });
-    }
-    return out;
-  }, [lapA, lapB.points]);
-
-  const lapARenderPath = useMemo(() => {
-    const pts = lapA.points;
-    const step = Math.max(1, Math.floor(pts.length / 400));
-    const out: LapPoint3D[] = [];
-    for (let i = 0; i < pts.length; i += step) out.push(pts[i]);
-    if (pts.length > 0 && out[out.length - 1] !== pts[pts.length - 1]) {
-      out.push(pts[pts.length - 1]);
-    }
-    return out;
-  }, [lapA.points]);
-
-  const cameraRef = useRef<CameraState>({
-    yaw: 0.65,
-    pitch: 0.58,
-    distance: 220,
-    targetX: 0,
-    targetY: 0,
-    targetZ: 0,
+  const liveRef = useRef<LiveFrameState>({
+    snapshot,
+    cameraMode,
+    followMidpoint,
+    labelA,
+    labelB,
   });
-  const lastTrackKeyRef = useRef<string>("");
-  const viewportRef = useRef<{ width: number; height: number; dpr: number }>({
-    width: 960,
-    height: 540,
-    dpr: 1,
-  });
-  const latestParamsRef = useRef<RenderParams | null>(null);
-  const rafDrawRef = useRef<number | null>(null);
 
-  const dragRef = useRef<{
-    active: boolean;
-    mode: "rotate" | "pan";
-    startX: number;
-    startY: number;
-    startYaw: number;
-    startPitch: number;
-    startTargetX: number;
-    startTargetZ: number;
+  useEffect(() => {
+    liveRef.current = {
+      snapshot,
+      cameraMode,
+      followMidpoint,
+      labelA,
+      labelB,
+    };
+  }, [snapshot, cameraMode, followMidpoint, labelA, labelB]);
+
+  const sceneRefs = useRef<{
+    scene: THREE.Scene;
+    camera: THREE.PerspectiveCamera;
+    controls: OrbitControls;
+    trackGroup: THREE.Group | null;
+    gridHelper: THREE.GridHelper | null;
+    kartA: KartRig;
+    kartB: KartRig;
   } | null>(null);
 
-  const scheduleRedraw = () => {
-    if (rafDrawRef.current !== null) return;
-    rafDrawRef.current = requestAnimationFrame(() => {
-      rafDrawRef.current = null;
-      const canvas = canvasRef.current;
-      const params = latestParamsRef.current;
-      if (!canvas || !params) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      drawTrack3DScene(ctx, viewportRef.current, cameraRef.current, params);
-    });
-  };
+  const lastTrackKeyRef = useRef<string>("");
 
-  const resetCameraToTrack = (mode: CameraMode = cameraMode) => {
-    cameraRef.current = {
-      yaw: 0.65,
-      pitch: mode === "top" ? 1.46 : 0.58,
-      distance: Math.max(85, trackMeta.radius * 1.95),
-      targetX: trackMeta.centerX,
-      targetY: trackMeta.centerY * elevationScale,
-      targetZ: trackMeta.centerZ,
-    };
-    scheduleRedraw();
+  const applyCameraPreset = (nextMode: CameraMode) => {
+    const refs = sceneRefs.current;
+    if (!refs) return;
+    if (nextMode === "top") {
+      const dist = Math.max(120, trackMeta.radius * 2.15);
+      refs.controls.target.set(trackMeta.centerX, 0, trackMeta.centerZ);
+      refs.camera.position.set(
+        trackMeta.centerX,
+        dist,
+        trackMeta.centerZ + dist * 0.04,
+      );
+      refs.controls.update();
+    } else if (nextMode === "orbit") {
+      const dist = Math.max(90, trackMeta.radius * 1.75);
+      refs.controls.target.set(trackMeta.centerX, 0, trackMeta.centerZ);
+      refs.camera.position.set(
+        trackMeta.centerX + dist * 0.16,
+        dist * 0.86,
+        trackMeta.centerZ + dist * 0.88,
+      );
+      refs.controls.update();
+    }
   };
 
   useEffect(() => {
-    const el = containerRef.current;
-    const canvas = canvasRef.current;
-    if (!el || !canvas) return;
+    const mountEl = mountRef.current;
+    if (!mountEl) return;
 
-    const updateSize = () => {
-      const rect = el.getBoundingClientRect();
-      const dpr = Math.min(2, window.devicePixelRatio || 1);
-      const width = Math.max(320, Math.round(rect.width));
-      const height = Math.max(240, Math.round(rect.height));
-      viewportRef.current = { width, height, dpr };
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
-      const ctx = canvas.getContext("2d");
-      if (ctx && latestParamsRef.current) {
-        drawTrack3DScene(ctx, viewportRef.current, cameraRef.current, latestParamsRef.current);
-      }
+    const width = Math.max(320, mountEl.clientWidth || 960);
+    const height = Math.max(240, mountEl.clientHeight || 560);
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: "high-performance",
+    });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    renderer.setSize(width, height);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    mountEl.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x07070a);
+    scene.fog = new THREE.FogExp2(0x07070a, 0.00055);
+
+    const camera = new THREE.PerspectiveCamera(48, width / height, 0.25, 4000);
+    camera.position.set(25, 110, 115);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.maxPolarAngle = Math.PI * 0.485;
+    controls.minDistance = 6;
+    controls.maxDistance = 1600;
+
+    const hemiLight = new THREE.HemisphereLight(0xdbeafe, 0x18181b, 0.95);
+    scene.add(hemiLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.45);
+    dirLight.position.set(160, 260, 120);
+    scene.add(dirLight);
+
+    const fillLight = new THREE.DirectionalLight(0x22d3ee, 0.45);
+    fillLight.position.set(-140, 80, -140);
+    scene.add(fillLight);
+
+    const kartA = createKartMesh(0x22d3ee, 0x0891b2);
+    const kartB = createKartMesh(0xf43f5e, 0x9f1239);
+    scene.add(kartA.root);
+    scene.add(kartB.root);
+
+    const connectorPositions = new Float32Array(6);
+    const connectorGeo = new THREE.BufferGeometry();
+    connectorGeo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(connectorPositions, 3),
+    );
+    const connectorLine = new THREE.Line(
+      connectorGeo,
+      new THREE.LineDashedMaterial({
+        color: 0xe4e4e7,
+        dashSize: 1.2,
+        gapSize: 0.9,
+        transparent: true,
+        opacity: 0.6,
+      }),
+    );
+    scene.add(connectorLine);
+
+    sceneRefs.current = {
+      scene,
+      camera,
+      controls,
+      trackGroup: null,
+      gridHelper: null,
+      kartA,
+      kartB,
     };
 
-    updateSize();
-    const ro = new ResizeObserver(updateSize);
-    ro.observe(el);
-    return () => {
-      ro.disconnect();
-      if (rafDrawRef.current !== null) {
-        cancelAnimationFrame(rafDrawRef.current);
-        rafDrawRef.current = null;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const w = Math.max(320, Math.round(entry.contentRect.width));
+      const h = Math.max(240, Math.round(entry.contentRect.height));
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+    ro.observe(mountEl);
+
+    const projVec = new THREE.Vector3();
+    let rafId = 0;
+
+    const updateKartTransform = (rig: KartRig, pt: LapPoint3D) => {
+      rig.root.position.set(pt.x, 0.04, pt.z);
+      rig.root.rotation.order = "YXZ";
+      rig.root.rotation.y = pt.headingRad;
+      rig.root.rotation.x = 0;
+      rig.root.rotation.z = Math.max(-0.07, Math.min(0.07, pt.latAcc * 0.03));
+      const steerRad = Math.max(-0.42, Math.min(0.42, -(pt.steeringDeg * Math.PI) / 180));
+      rig.flPivot.rotation.y = steerRad;
+      rig.frPivot.rotation.y = steerRad;
+    };
+
+    const updateBadge = (
+      el: HTMLDivElement | null,
+      worldPos: THREE.Vector3,
+      w: number,
+      h: number,
+    ) => {
+      if (!el) return;
+      projVec.copy(worldPos).project(camera);
+      if (projVec.z > 1 || projVec.z < -1) {
+        el.style.opacity = "0";
+        return;
       }
+      const sx = (projVec.x * 0.5 + 0.5) * w;
+      const sy = (-projVec.y * 0.5 + 0.5) * h;
+      el.style.opacity = "1";
+      el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -115%)`;
+    };
+
+    const animate = () => {
+      const state = liveRef.current;
+      const { pointA, pointB } = state.snapshot;
+
+      updateKartTransform(kartA, pointA);
+      updateKartTransform(kartB, pointB);
+
+      const posAttr = connectorGeo.attributes.position as THREE.BufferAttribute;
+      posAttr.setXYZ(0, pointA.x, 0.35, pointA.z);
+      posAttr.setXYZ(1, pointB.x, 0.35, pointB.z);
+      posAttr.needsUpdate = true;
+      connectorLine.computeLineDistances();
+
+      if (state.cameraMode === "chase-a" || state.cameraMode === "chase-b") {
+        controls.enabled = false;
+        const focus = state.cameraMode === "chase-a" ? pointA : pointB;
+        const sinH = Math.sin(focus.headingRad);
+        const cosH = Math.cos(focus.headingRad);
+
+        const desiredPos = new THREE.Vector3(
+          focus.x - sinH * 10.5,
+          3.8,
+          focus.z - cosH * 10.5,
+        );
+        camera.position.lerp(desiredPos, 0.22);
+        camera.lookAt(
+          focus.x + sinH * 12,
+          1.0,
+          focus.z + cosH * 12,
+        );
+      } else {
+        controls.enabled = true;
+        if (state.cameraMode === "orbit" && state.followMidpoint) {
+          controls.target.lerp(
+            new THREE.Vector3(
+              (pointA.x + pointB.x) * 0.5,
+              0,
+              (pointA.z + pointB.z) * 0.5,
+            ),
+            0.18,
+          );
+        }
+        controls.update();
+      }
+
+      renderer.render(scene, camera);
+
+      const cw = renderer.domElement.clientWidth || width;
+      const ch = renderer.domElement.clientHeight || height;
+      updateBadge(
+        badgeARef.current,
+        new THREE.Vector3(pointA.x, 1.35, pointA.z),
+        cw,
+        ch,
+      );
+      updateBadge(
+        badgeBRef.current,
+        new THREE.Vector3(pointB.x, 1.35, pointB.z),
+        cw,
+        ch,
+      );
+
+      rafId = requestAnimationFrame(animate);
+    };
+
+    rafId = requestAnimationFrame(animate);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      ro.disconnect();
+      controls.dispose();
+      if (sceneRefs.current?.trackGroup) {
+        disposeObject3D(sceneRefs.current.trackGroup);
+      }
+      if (sceneRefs.current?.gridHelper) {
+        sceneRefs.current.gridHelper.geometry.dispose();
+      }
+      disposeObject3D(kartA.root);
+      disposeObject3D(kartB.root);
+      connectorGeo.dispose();
+      (connectorLine.material as THREE.Material).dispose();
+      renderer.dispose();
+      if (renderer.domElement.parentNode === mountEl) {
+        mountEl.removeChild(renderer.domElement);
+      }
+      sceneRefs.current = null;
     };
   }, []);
 
   useEffect(() => {
-    const params: RenderParams = {
+    const refs = sceneRefs.current;
+    if (!refs) return;
+
+    if (refs.trackGroup) {
+      refs.scene.remove(refs.trackGroup);
+      disposeObject3D(refs.trackGroup);
+      refs.trackGroup = null;
+    }
+
+    if (refs.gridHelper) {
+      refs.scene.remove(refs.gridHelper);
+      refs.gridHelper.geometry.dispose();
+      refs.gridHelper = null;
+    }
+
+    const gridSize = Math.max(300, Math.ceil((trackMeta.radius * 3) / 50) * 50);
+    const grid = new THREE.GridHelper(
+      gridSize,
+      Math.max(12, Math.round(gridSize / 20)),
+      0x27272a,
+      0x18181b,
+    );
+    grid.position.set(trackMeta.centerX, -0.15, trackMeta.centerZ);
+    refs.scene.add(grid);
+    refs.gridHelper = grid;
+
+    const trackGroup = buildTrackAndLinesGroup(
+      centerline,
       lapA,
       lapB,
-      snapshot,
-      labelA,
-      labelB,
-      cameraMode,
-      followMidpoint,
-      colorMode,
       trackWidth,
-      elevationScale,
-      showElevationColumns,
-      trackMeta,
-      trackStations,
-      lapARenderPath,
-      lapBRenderPath,
-    };
-    latestParamsRef.current = params;
+      colorMode,
+    );
+    refs.scene.add(trackGroup);
+    refs.trackGroup = trackGroup;
 
     if (lastTrackKeyRef.current !== trackMeta.key) {
       lastTrackKeyRef.current = trackMeta.key;
-      cameraRef.current = {
-        yaw: 0.65,
-        pitch: cameraMode === "top" ? 1.46 : 0.58,
-        distance: Math.max(85, trackMeta.radius * 1.95),
-        targetX: trackMeta.centerX,
-        targetY: trackMeta.centerY * elevationScale,
-        targetZ: trackMeta.centerZ,
-      };
+      const dist = Math.max(90, trackMeta.radius * 1.75);
+      refs.controls.target.set(trackMeta.centerX, 0, trackMeta.centerZ);
+      refs.camera.position.set(
+        trackMeta.centerX + dist * 0.16,
+        dist * 0.86,
+        trackMeta.centerZ + dist * 0.88,
+      );
+      refs.controls.update();
     }
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    drawTrack3DScene(ctx, viewportRef.current, cameraRef.current, params);
-  }, [
-    lapA,
-    lapB,
-    snapshot,
-    labelA,
-    labelB,
-    cameraMode,
-    followMidpoint,
-    colorMode,
-    trackWidth,
-    elevationScale,
-    showElevationColumns,
-    trackMeta,
-    trackStations,
-    lapARenderPath,
-    lapBRenderPath,
-  ]);
-
-  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (cameraMode === "chase-a" || cameraMode === "chase-b") return;
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const isPan = e.button === 2 || e.shiftKey || cameraMode === "top";
-    dragRef.current = {
-      active: true,
-      mode: isPan ? "pan" : "rotate",
-      startX: e.clientX,
-      startY: e.clientY,
-      startYaw: cameraRef.current.yaw,
-      startPitch: cameraRef.current.pitch,
-      startTargetX: cameraRef.current.targetX,
-      startTargetZ: cameraRef.current.targetZ,
-    };
-  };
-
-  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const drag = dragRef.current;
-    if (!drag || !drag.active) return;
-
-    const dx = e.clientX - drag.startX;
-    const dy = e.clientY - drag.startY;
-    const cam = cameraRef.current;
-
-    if (drag.mode === "rotate") {
-      cam.yaw = drag.startYaw - dx * 0.007;
-      cam.pitch = Math.max(0.08, Math.min(1.46, drag.startPitch + dy * 0.006));
-    } else {
-      const panSpeed = cam.distance * 0.0022;
-      const cosY = Math.cos(cam.yaw);
-      const sinY = Math.sin(cam.yaw);
-      if (followMidpoint) setFollowMidpoint(false);
-      cam.targetX = drag.startTargetX - (dx * cosY + dy * sinY) * panSpeed;
-      cam.targetZ = drag.startTargetZ + (dx * sinY - dy * cosY) * panSpeed;
-    }
-    scheduleRedraw();
-  };
-
-  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (dragRef.current?.active) {
-      dragRef.current = null;
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }
-    }
-  };
-
-  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    if (cameraMode === "chase-a" || cameraMode === "chase-b") return;
-    const factor = e.deltaY > 0 ? 1.1 : 0.9;
-    cameraRef.current.distance = Math.max(
-      12,
-      Math.min(1200, cameraRef.current.distance * factor),
-    );
-    scheduleRedraw();
-  };
+  }, [centerline, lapA, lapB, trackWidth, colorMode, trackMeta]);
 
   return (
     <div className="flex flex-col space-y-3">
@@ -1277,7 +883,7 @@ export default function Track3DViewer({
         <div className="flex flex-wrap items-center gap-1.5">
           <span className="text-[10px] font-black uppercase tracking-wider text-zinc-500 flex items-center space-x-1 mr-1">
             <Camera size={12} className="text-cyan-400" />
-            <span>View</span>
+            <span>Three.js Cam</span>
           </span>
           {(
             [
@@ -1292,10 +898,8 @@ export default function Track3DViewer({
               type="button"
               onClick={() => {
                 setCameraMode(item.id);
-                if (item.id === "top") {
-                  cameraRef.current.pitch = 1.48;
-                } else if (item.id === "orbit" && cameraRef.current.pitch > 1.35) {
-                  cameraRef.current.pitch = 0.58;
+                if (item.id === "top" || item.id === "orbit") {
+                  applyCameraPreset(item.id);
                 }
               }}
               className={`px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider border transition cursor-pointer ${
@@ -1341,35 +945,6 @@ export default function Track3DViewer({
             <span>{colorMode === "lap" ? "Lines: Lap Colors" : "Lines: Speed Δ"}</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              const idx = ELEVATION_OPTIONS.indexOf(elevationScale);
-              setElevationScale(
-                ELEVATION_OPTIONS[(idx + 1) % ELEVATION_OPTIONS.length],
-              );
-            }}
-            className="px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider border bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700 transition flex items-center space-x-1 cursor-pointer"
-            title="Cycle terrain elevation exaggeration"
-          >
-            <Mountain size={11} className="text-cyan-400" />
-            <span>Elev {elevationScale}x</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowElevationColumns((v) => !v)}
-            className={`px-2 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider border transition flex items-center space-x-1 cursor-pointer ${
-              showElevationColumns
-                ? "bg-zinc-800 border-zinc-600 text-zinc-100"
-                : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200"
-            }`}
-            title="Toggle vertical elevation support struts"
-          >
-            <Eye size={11} />
-            <span>Pillars</span>
-          </button>
-
           <label className="flex items-center space-x-1.5 text-[10px] text-zinc-400 font-bold uppercase bg-zinc-900 border border-zinc-800 px-2.5 py-1 rounded-lg">
             <span>Width {trackWidth}m</span>
             <input
@@ -1387,7 +962,7 @@ export default function Track3DViewer({
             type="button"
             onClick={() => {
               setFollowMidpoint(false);
-              resetCameraToTrack(cameraMode);
+              applyCameraPreset(cameraMode === "top" ? "top" : "orbit");
             }}
             className="px-2.5 py-1 rounded-lg text-[10px] font-extrabold uppercase tracking-wider border bg-zinc-900 border-zinc-800 text-zinc-300 hover:border-zinc-700 transition flex items-center space-x-1 cursor-pointer"
           >
@@ -1397,20 +972,38 @@ export default function Track3DViewer({
         </div>
       </div>
 
-      <div
-        ref={containerRef}
-        className="relative w-full aspect-16/10 min-h-96 bg-zinc-950 rounded-3xl border border-zinc-800/80 overflow-hidden shadow-2xl"
-      >
-        <canvas
-          ref={canvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-          onWheel={handleWheel}
-          onContextMenu={(e) => e.preventDefault()}
-          className="w-full h-full block cursor-grab active:cursor-grabbing touch-none"
+      <div className="relative w-full aspect-16/10 min-h-96 bg-zinc-950 rounded-3xl border border-zinc-800/80 overflow-hidden shadow-2xl">
+        <div
+          ref={mountRef}
+          className="w-full h-full cursor-grab active:cursor-grabbing"
         />
+
+        <div
+          ref={badgeARef}
+          className="absolute top-0 left-0 pointer-events-none px-2 py-1 rounded-lg bg-zinc-950/90 border border-cyan-400/80 shadow-[0_0_10px_rgba(34,211,238,0.28)] whitespace-nowrap"
+          style={{ opacity: 0 }}
+        >
+          <div className="text-[10px] font-bold text-zinc-100 leading-tight">
+            A • {Math.round(snapshot.pointA.speed)} km/h
+          </div>
+          <div className="text-[9px] font-mono font-bold text-cyan-400 leading-tight">
+            {labelA}
+          </div>
+        </div>
+
+        <div
+          ref={badgeBRef}
+          className="absolute top-0 left-0 pointer-events-none px-2 py-1 rounded-lg bg-zinc-950/90 border border-rose-500/80 shadow-[0_0_10px_rgba(244,63,94,0.28)] whitespace-nowrap"
+          style={{ opacity: 0 }}
+        >
+          <div className="text-[10px] font-bold text-zinc-100 leading-tight">
+            B • {Math.round(snapshot.pointB.speed)} km/h
+          </div>
+          <div className="text-[9px] font-mono font-bold text-rose-400 leading-tight">
+            {labelB} ({snapshot.timeDelta >= 0 ? "+" : ""}
+            {snapshot.timeDelta.toFixed(3)}s)
+          </div>
+        </div>
 
         <div className="absolute top-3 left-3 pointer-events-none flex flex-col space-y-1.5 bg-zinc-950/85 backdrop-blur-md border border-zinc-800/90 rounded-2xl px-3.5 py-2.5">
           <div className="flex items-center space-x-3 text-[11px] font-mono font-bold">
@@ -1453,9 +1046,9 @@ export default function Track3DViewer({
           <Compass size={11} className="text-cyan-400" />
           <span>
             {cameraMode === "orbit"
-              ? "Drag: Orbit • Shift/Right-Drag: Pan • Scroll: Zoom"
+              ? "WebGL Orbit • Left-Drag: Rotate • Right-Drag: Pan • Scroll: Zoom"
               : cameraMode === "top"
-                ? "Drag: Pan • Scroll: Zoom"
+                ? "Right-Drag: Pan • Scroll: Zoom"
                 : `Locked Chase Cam (${cameraMode === "chase-a" ? labelA : labelB})`}
           </span>
         </div>
@@ -1478,7 +1071,7 @@ export default function Track3DViewer({
         )}
 
         {(!lapA.hasGps || !lapB.hasGps) && (
-          <div className="absolute bottom-3 right-14 pointer-events-none bg-amber-950/80 border border-amber-700/60 text-amber-300 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider flex items-center space-x-1">
+          <div className="absolute bottom-3 right-4 pointer-events-none bg-amber-950/80 border border-amber-700/60 text-amber-300 px-2.5 py-1 rounded-lg text-[9px] font-bold uppercase tracking-wider flex items-center space-x-1">
             <Maximize2 size={10} />
             <span>Dead-Reckoned Path (No GPS Channels)</span>
           </div>
