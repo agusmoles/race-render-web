@@ -26,6 +26,7 @@ import {
   type TrackMapProps,
   type HUDLayoutConfig,
 } from "../utils/hud-draw";
+import type { ReferenceLapTarget } from "../utils/telemetry-compare";
 
 interface TelemetryRow {
   time: number;
@@ -63,6 +64,8 @@ interface WorkerInitPayload {
   videoDurations: number[];
   targetBitrate: number;
   writableStream?: WritableStream<StreamTargetChunk>;
+  referenceLap?: ReferenceLapTarget | null;
+  showGhostOnMap?: boolean;
 }
 
 const GOOGLE_FONTS_CSS_URL =
@@ -241,6 +244,8 @@ async function run(payload: WorkerInitPayload) {
     videoDurations,
     targetBitrate,
     writableStream,
+    referenceLap,
+    showGhostOnMap,
   } = payload;
 
   const trackSourcePoints =
@@ -451,6 +456,8 @@ async function run(payload: WorkerInitPayload) {
         maxSpeed,
         maxRpm,
         telemetryLaps,
+        referenceLap,
+        showGhostOnMap,
       };
 
       drawCanvasHUD(ctx, evenWidth, evenHeight, tel, gHistory, trackMapProps, layoutConfig);

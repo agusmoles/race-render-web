@@ -23,6 +23,26 @@ import {
 } from "lucide-react";
 import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
 import { autoSyncWithGpmf, AutoSyncResult } from "@/utils/gpmf-sync";
+import {
+  analyzeSessionLaps,
+  areTracksCompatible,
+  buildReferenceLapTarget,
+  COMPARISON_ACCENT_COLORS,
+  evaluateGhostPosition,
+  evaluateReferenceAtProgress,
+  extractRacerDisplayName,
+  formatLapTime,
+  MAX_COMPARISON_SESSIONS,
+  MAX_CSV_BYTES,
+  PRIMARY_REFERENCE_ACCENT,
+  PRIMARY_SESSION_ID,
+  sanitizeDisplayLabel,
+  type ComparisonSelection,
+  type ComparisonSession,
+  type LiveComparisonMetric,
+  type ReferenceLapTarget,
+} from "@/utils/telemetry-compare";
+import ComparisonPanel from "./ComparisonPanel";
 import Speedometer from "./gauges/Speedometer";
 import RpmGauge from "./gauges/RpmGauge";
 import GForceRadar from "./gauges/GForceRadar";
@@ -363,6 +383,19 @@ export default function Workspace() {
   );
   const pendingModalSeekRef = useRef<number | null>(null);
 
+  const [comparisonSessions, setComparisonSessions] = useState<
+    ComparisonSession[]
+  >([]);
+  const [comparisonSelection, setComparisonSelection] =
+    useState<ComparisonSelection>({
+      sourceId: PRIMARY_SESSION_ID,
+      lapNum: null,
+    });
+  const [showGhostOnMap, setShowGhostOnMap] = useState(true);
+  const [comparisonError, setComparisonError] = useState("");
+  const [isParsingComparison, setIsParsingComparison] = useState(false);
+  const comparisonCounterRef = useRef(0);
+
   const telemetryMeta = useMemo(() => {
     if (!localTelemetry)
       return { totalDuration: 0, sampleRate: 0, timeUnitCorrected: false };
@@ -391,167 +424,18 @@ export default function Workspace() {
     return Math.ceil(max / 500) * 500 || 15000;
   }, [localTelemetry]);
 
-  const lapTimes = useMemo(() => {
-    if (!localTelemetry?.rows || localTelemetry.rows.length === 0)
-      return {
-        laps: {} as Record<number, number>,
-        starts: {} as Record<number, number>,
-        ends: {} as Record<number, number>,
-        startDistances: {} as Record<number, number>,
-        lapDistances: {} as Record<number, number>,
-      };
-    const laps: Record<number, number> = {};
-    const starts: Record<number, number> = {};
-    const ends: Record<number, number> = {};
-    const startDistances: Record<number, number> = {};
-    const lapDistances: Record<number, number> = {};
+  const primaryLapAnalysis = useMemo(
+    () => analyzeSessionLaps(localTelemetry?.rows ?? []),
+    [localTelemetry],
+  );
 
-    localTelemetry.rows.forEach((r) => {
-      if (r.lap === undefined || r.lap < 1) return;
-      if (starts[r.lap] === undefined || r.time < starts[r.lap]) {
-        starts[r.lap] = r.time;
-        startDistances[r.lap] = r.distance || 0;
-      }
-      if (ends[r.lap] === undefined || r.time > ends[r.lap]) {
-        ends[r.lap] = r.time;
-      }
-    });
-
-    const lapKeys = Object.keys(starts)
-      .map(Number)
-      .sort((a, b) => a - b);
-    lapKeys.forEach((k, idx) => {
-      if (idx < lapKeys.length - 1) {
-        laps[k] = starts[lapKeys[idx + 1]] - starts[k];
-        lapDistances[k] = startDistances[lapKeys[idx + 1]] - startDistances[k];
-      } else {
-        laps[k] = ends[k] - starts[k];
-        const lapRows = localTelemetry.rows.filter((r) => r.lap === k);
-        const maxDist =
-          lapRows.length > 0
-            ? Math.max(...lapRows.map((r) => r.distance || 0))
-            : startDistances[k];
-        lapDistances[k] = maxDist - startDistances[k];
-      }
-    });
-
-    return { laps, starts, ends, startDistances, lapDistances };
-  }, [localTelemetry]);
-
-  const bestLapInfo = useMemo(() => {
-    if (!lapTimes || !lapTimes.laps) return { lap: 0, time: 0 };
-    const lapKeys = Object.keys(lapTimes.laps)
-      .map(Number)
-      .sort((a, b) => a - b);
-    if (lapKeys.length === 0) return { lap: 0, time: 0 };
-
-    let bestLap = 0;
-    let bestTime = Infinity;
-
-    const lastLapKey = lapKeys[lapKeys.length - 1];
-
-    lapKeys.forEach((lapNum) => {
-      if (lapKeys.length > 1 && lapNum === lastLapKey) return;
-
-      const duration = lapTimes.laps[lapNum];
-      if (duration < bestTime && duration > 5) {
-        bestTime = duration;
-        bestLap = lapNum;
-      }
-    });
-
-    return bestTime === Infinity
-      ? { lap: 0, time: 0 }
-      : { lap: bestLap, time: bestTime };
-  }, [lapTimes]);
+  const lapTimes = primaryLapAnalysis;
+  const bestLapInfo = primaryLapAnalysis.bestLap;
 
   const bestLapRows = useMemo(() => {
     if (!localTelemetry?.rows || bestLapInfo.lap === 0) return [];
     return localTelemetry.rows.filter((r) => r.lap === bestLapInfo.lap);
   }, [localTelemetry, bestLapInfo.lap]);
-
-  const getDeltaTime = (
-    currentLap: number,
-    elapsedTime: number,
-    elapsedDist: number,
-  ) => {
-    if (bestLapInfo.lap === 0 || bestLapRows.length === 0) return 0;
-    if (currentLap === bestLapInfo.lap) return 0;
-
-    const isInLap = telemetryLaps.length > 0 && currentLap === telemetryLaps[0];
-    const isOutLap =
-      telemetryLaps.length > 1 &&
-      currentLap === telemetryLaps[telemetryLaps.length - 1];
-    if (isInLap || isOutLap) return 0;
-
-    const bestStartDist = lapTimes.startDistances?.[bestLapInfo.lap] || 0;
-    const bestStartTime = lapTimes.starts[bestLapInfo.lap] || 0;
-
-    const bestLapTotalDist = lapTimes.lapDistances?.[bestLapInfo.lap] || 0;
-    const currentLapTotalDist = lapTimes.lapDistances?.[currentLap] || 0;
-
-    let scaledElapsedDist = elapsedDist;
-    if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
-      scaledElapsedDist =
-        elapsedDist * (bestLapTotalDist / currentLapTotalDist);
-      scaledElapsedDist = Math.max(
-        0,
-        Math.min(bestLapTotalDist, scaledElapsedDist),
-      );
-    }
-
-    let low = 0;
-    let high = bestLapRows.length - 1;
-    let matchIdx = -1;
-
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2);
-      const midDist = bestLapRows[mid].distance - bestStartDist;
-      if (midDist === scaledElapsedDist) {
-        matchIdx = mid;
-        break;
-      } else if (midDist < scaledElapsedDist) {
-        low = mid + 1;
-      } else {
-        high = mid - 1;
-      }
-    }
-
-    let bestLapTime = 0;
-    if (matchIdx !== -1) {
-      bestLapTime = bestLapRows[matchIdx].time - bestStartTime;
-    } else {
-      const idxB = Math.min(low, bestLapRows.length - 1);
-      const idxA = Math.max(0, idxB - 1);
-      const rowA = bestLapRows[idxA];
-      const rowB = bestLapRows[idxB];
-
-      const distA = rowA.distance - bestStartDist;
-      const distB = rowB.distance - bestStartDist;
-
-      let fraction = 0;
-      if (distB !== distA) {
-        fraction = Math.max(
-          0,
-          Math.min(1, (scaledElapsedDist - distA) / (distB - distA)),
-        );
-      }
-
-      const timeA = rowA.time - bestStartTime;
-      const timeB = rowB.time - bestStartTime;
-      bestLapTime = timeA + fraction * (timeB - timeA);
-    }
-
-    return elapsedTime - bestLapTime;
-  };
-
-  const formatLapTime = (secs: number) => {
-    if (isNaN(secs) || secs <= 0) return "0:00.00";
-    const mins = Math.floor(secs / 60);
-    const remainingSecs = Math.floor(secs % 60);
-    const centiseconds = Math.floor((secs % 1) * 100);
-    return `${mins}:${remainingSecs.toString().padStart(2, "0")}.${centiseconds.toString().padStart(2, "0")}`;
-  };
 
   const seekToTelemetryTime = (targetSeconds: number) => {
     if (!localTelemetry?.rows || localTelemetry.rows.length === 0) return;
@@ -566,15 +450,7 @@ export default function Workspace() {
     setModalTelemetryIdx(lo);
   };
 
-  // List of unique laps present in the telemetry logs
-  const telemetryLaps = useMemo(() => {
-    if (!localTelemetry?.rows) return [];
-    const lapsSet = new Set<number>();
-    localTelemetry.rows.forEach((r) => {
-      if (r.lap !== undefined && r.lap >= 0) lapsSet.add(r.lap);
-    });
-    return Array.from(lapsSet).sort((a, b) => a - b);
-  }, [localTelemetry]);
+  const telemetryLaps = primaryLapAnalysis.lapNumbers;
 
   const firstTimedLapNum = telemetryLaps.length > 1 ? telemetryLaps[1] : -1;
 
@@ -805,6 +681,20 @@ export default function Workspace() {
         latestCsvRef.current = { file, telemetry: parsed };
         setLocalTelemetry(parsed);
         setChannelMapping(parsed.channelMapping);
+        setComparisonSelection((prev) =>
+          prev.sourceId === PRIMARY_SESSION_ID
+            ? { sourceId: PRIMARY_SESSION_ID, lapNum: null }
+            : prev,
+        );
+        setComparisonSessions((prev) =>
+          prev.map((session) => ({
+            ...session,
+            trackCompatible: areTracksCompatible(
+              parsed.rows,
+              session.telemetry.rows,
+            ),
+          })),
+        );
 
         const { files, durations } = latestVideoRef.current;
         if (files.length > 0 && durations.length === files.length) {
@@ -812,11 +702,141 @@ export default function Workspace() {
         }
       } catch (err) {
         const error = err as Error;
-        console.error(error);
         setUploadError("Error reading telemetry: " + error.message);
       } finally {
         setIsProcessing(false);
       }
+    }
+  };
+
+  const handleAddComparisonCSVs = async (fileList: FileList) => {
+    const remainingSlots = MAX_COMPARISON_SESSIONS - comparisonSessions.length;
+    if (remainingSlots <= 0) {
+      setComparisonError(
+        `Maximum of ${MAX_COMPARISON_SESSIONS} comparison CSV sessions reached.`,
+      );
+      return;
+    }
+
+    const incoming = Array.from(fileList);
+    const errors: string[] = [];
+    const added: ComparisonSession[] = [];
+    const primaryCoords =
+      gpsPoints.length >= 5 ? gpsPoints : (localTelemetry?.rows ?? []);
+
+    setComparisonError("");
+    setIsParsingComparison(true);
+
+    try {
+      for (const file of incoming) {
+        if (added.length >= remainingSlots) {
+          errors.push(
+            `Skipped ${sanitizeDisplayLabel(file.name, 28)}: limit of ${MAX_COMPARISON_SESSIONS} sessions reached.`,
+          );
+          break;
+        }
+        if (!file.name.toLowerCase().endsWith(".csv")) {
+          errors.push(
+            `Skipped ${sanitizeDisplayLabel(file.name, 28)}: only .csv files are supported.`,
+          );
+          continue;
+        }
+        if (file.size > MAX_CSV_BYTES) {
+          errors.push(
+            `Skipped ${sanitizeDisplayLabel(file.name, 28)}: file exceeds 50 MB limit.`,
+          );
+          continue;
+        }
+
+        try {
+          const text = await file.text();
+          const parsed = parseTelemetryCSV(text);
+          if (parsed.rows.length < 2) {
+            errors.push(
+              `Skipped ${sanitizeDisplayLabel(file.name, 28)}: no telemetry rows found.`,
+            );
+            continue;
+          }
+
+          const analysis = analyzeSessionLaps(parsed.rows);
+          if (analysis.selectableLaps.length === 0) {
+            errors.push(
+              `Skipped ${sanitizeDisplayLabel(file.name, 28)}: no valid timed laps found.`,
+            );
+            continue;
+          }
+
+          const idx = comparisonCounterRef.current++;
+          const color =
+            COMPARISON_ACCENT_COLORS[idx % COMPARISON_ACCENT_COLORS.length];
+
+          added.push({
+            id: `cmp_${idx}_${Date.now()}`,
+            fileName: sanitizeDisplayLabel(file.name, 60),
+            racerName: extractRacerDisplayName(parsed.metadata, file.name),
+            sessionName: sanitizeDisplayLabel(
+              parsed.metadata["Session"] || "",
+              40,
+            ),
+            vehicle: sanitizeDisplayLabel(
+              parsed.metadata["Vehicle"] || "",
+              40,
+            ),
+            color,
+            telemetry: parsed,
+            analysis,
+            selectedLapNum: null,
+            trackCompatible: areTracksCompatible(primaryCoords, parsed.rows),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Invalid CSV";
+          errors.push(
+            `Failed ${sanitizeDisplayLabel(file.name, 28)}: ${sanitizeDisplayLabel(msg, 60)}`,
+          );
+        }
+      }
+
+      if (added.length > 0) {
+        setComparisonSessions((prev) =>
+          [...prev, ...added].slice(0, MAX_COMPARISON_SESSIONS),
+        );
+        setComparisonSelection({ sourceId: added[0].id, lapNum: null });
+      }
+      if (errors.length > 0) {
+        setComparisonError(errors[0]);
+      }
+    } finally {
+      setIsParsingComparison(false);
+    }
+  };
+
+  const handleRemoveComparisonSession = (sessionId: string) => {
+    setComparisonSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setComparisonSelection((prev) =>
+      prev.sourceId === sessionId
+        ? { sourceId: PRIMARY_SESSION_ID, lapNum: null }
+        : prev,
+    );
+  };
+
+  const handleRenameComparisonSession = (
+    sessionId: string,
+    nextName: string,
+  ) => {
+    const clean = sanitizeDisplayLabel(nextName, 40) || "Racer";
+    setComparisonSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, racerName: clean } : s)),
+    );
+  };
+
+  const handleSelectComparison = (sourceId: string, lapNum: number | null) => {
+    setComparisonSelection({ sourceId, lapNum });
+    if (sourceId !== PRIMARY_SESSION_ID) {
+      setComparisonSessions((prev) =>
+        prev.map((s) =>
+          s.id === sourceId ? { ...s, selectedLapNum: lapNum } : s,
+        ),
+      );
     }
   };
 
@@ -1313,6 +1333,19 @@ export default function Workspace() {
         return;
       }
 
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const delta = e.key === "ArrowUp" ? 0.05 : -0.05;
+        const currentVol = videoRef.current.muted ? 0 : videoRef.current.volume;
+        const next = Math.max(
+          0,
+          Math.min(1, Math.round((currentVol + delta) * 100) / 100),
+        );
+        setVolume(next);
+        setIsMuted(next === 0);
+        return;
+      }
+
       let seekDelta: number | null = null;
       if (e.key === "ArrowLeft") {
         seekDelta = e.shiftKey ? -10 : -3;
@@ -1586,6 +1619,8 @@ export default function Workspace() {
         canvasHeight,
         videoDurations,
         targetBitrate,
+        referenceLap: activeReferenceLap,
+        showGhostOnMap,
       },
     });
   };
@@ -1598,6 +1633,69 @@ export default function Workspace() {
     ];
   }, [localTelemetry, modalTelemetryIdx]);
 
+  const primaryRacerName = useMemo(
+    () =>
+      sanitizeDisplayLabel(
+        localTelemetry?.metadata["Racer"] ||
+          localTelemetry?.metadata["Driver"] ||
+          "",
+        40,
+      ),
+    [localTelemetry],
+  );
+
+  const primarySessionName = useMemo(
+    () => sanitizeDisplayLabel(localTelemetry?.metadata["Session"] || "", 40),
+    [localTelemetry],
+  );
+
+  const primaryHasGps = gpsPoints.length >= 5;
+  const selectedSourceId = comparisonSelection.sourceId;
+  const selectedPrimaryLapNum =
+    selectedSourceId === PRIMARY_SESSION_ID ? comparisonSelection.lapNum : null;
+
+  const primaryReferenceLap = useMemo(() => {
+    if (!localTelemetry?.rows) return null;
+    return buildReferenceLapTarget({
+      sourceId: PRIMARY_SESSION_ID,
+      isPrimarySession: true,
+      racerName: primaryRacerName || "You",
+      accentColor: PRIMARY_REFERENCE_ACCENT,
+      rows: localTelemetry.rows,
+      analysis: primaryLapAnalysis,
+      requestedLapNum: selectedPrimaryLapNum,
+      trackCompatible: primaryHasGps,
+    });
+  }, [
+    localTelemetry,
+    primaryRacerName,
+    primaryLapAnalysis,
+    selectedPrimaryLapNum,
+    primaryHasGps,
+  ]);
+
+  const sessionReferenceTargets = useMemo(() => {
+    const map: Record<string, ReferenceLapTarget | null> = {};
+    for (const session of comparisonSessions) {
+      map[session.id] = buildReferenceLapTarget({
+        sourceId: session.id,
+        isPrimarySession: false,
+        racerName: session.racerName,
+        accentColor: session.color,
+        rows: session.telemetry.rows,
+        analysis: session.analysis,
+        requestedLapNum: session.selectedLapNum,
+        trackCompatible: session.trackCompatible,
+      });
+    }
+    return map;
+  }, [comparisonSessions]);
+
+  const activeReferenceLap =
+    selectedSourceId === PRIMARY_SESSION_ID
+      ? primaryReferenceLap
+      : (sessionReferenceTargets[selectedSourceId] ?? null);
+
   const currentTelemetryTime = useMemo(() => {
     return (currentTime - syncOffset) * speedScale;
   }, [currentTime, syncOffset, speedScale]);
@@ -1607,18 +1705,72 @@ export default function Workspace() {
     return Math.max(0, currentTelemetryTime - start);
   }, [lapTimes, currentTelemetry.lap, currentTelemetryTime]);
 
-  const currentDelta = useMemo(() => {
+  const activeComparisonMetric = useMemo(() => {
     const elapsedDist =
       currentTelemetry.distance -
-      (lapTimes.startDistances?.[currentTelemetry.lap] || 0);
-    return getDeltaTime(currentTelemetry.lap, currentLapElapsed, elapsedDist);
+      (lapTimes.startDistances[currentTelemetry.lap] || 0);
+    const currentLapTotalDist =
+      lapTimes.lapDistances[currentTelemetry.lap] || 0;
+    return evaluateReferenceAtProgress(
+      activeReferenceLap,
+      currentTelemetry.lap,
+      telemetryLaps,
+      currentLapElapsed,
+      elapsedDist,
+      currentLapTotalDist,
+    );
   }, [
+    activeReferenceLap,
     currentTelemetry.lap,
     currentTelemetry.distance,
     currentLapElapsed,
     lapTimes,
-    bestLapRows,
-    bestLapInfo,
+    telemetryLaps,
+  ]);
+
+  const ghostCoord = useMemo(() => {
+    if (!showGhostOnMap) return null;
+    return evaluateGhostPosition(
+      activeReferenceLap,
+      currentTelemetry.lap,
+      telemetryLaps,
+      currentLapElapsed,
+    );
+  }, [
+    showGhostOnMap,
+    activeReferenceLap,
+    currentTelemetry.lap,
+    telemetryLaps,
+    currentLapElapsed,
+  ]);
+
+  const sessionLiveMetrics = useMemo(() => {
+    const metrics: Record<string, LiveComparisonMetric> = {};
+    const elapsedDist =
+      currentTelemetry.distance -
+      (lapTimes.startDistances[currentTelemetry.lap] || 0);
+    const currentLapTotalDist =
+      lapTimes.lapDistances[currentTelemetry.lap] || 0;
+
+    for (const session of comparisonSessions) {
+      metrics[session.id] = evaluateReferenceAtProgress(
+        sessionReferenceTargets[session.id] ?? null,
+        currentTelemetry.lap,
+        telemetryLaps,
+        currentLapElapsed,
+        elapsedDist,
+        currentLapTotalDist,
+      );
+    }
+    return metrics;
+  }, [
+    comparisonSessions,
+    sessionReferenceTargets,
+    currentTelemetry.lap,
+    currentTelemetry.distance,
+    currentLapElapsed,
+    lapTimes,
+    telemetryLaps,
   ]);
 
   const effectiveExportEnd =
@@ -1765,6 +1917,17 @@ export default function Workspace() {
                     {formatTimeMinutes(videoDuration)}
                   </span>
                 </div>
+                {activeReferenceLap && (
+                  <div className="flex items-center space-x-1.5">
+                    <span
+                      className="w-2 h-2 rounded-full"
+                      style={{ backgroundColor: activeReferenceLap.accentColor }}
+                    />
+                    <span className="text-[10px] text-zinc-400 font-bold truncate max-w-52">
+                      {activeReferenceLap.hudLabel}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-col space-y-4 bg-zinc-950/40 border border-zinc-800/80 p-4 rounded-2xl">
@@ -2740,6 +2903,8 @@ export default function Workspace() {
                       currentLat={currentTelemetry.lat}
                       currentLon={currentTelemetry.lon}
                       startFinishCoord={startFinishCoord}
+                      ghostCoord={ghostCoord}
+                      ghostColor={activeReferenceLap?.accentColor}
                     />
                   </HudWidgetFrame>
                 )}
@@ -2779,8 +2944,9 @@ export default function Workspace() {
                     onResizeStart={handleWidgetResizeStart}
                   >
                     <DeltaBar
-                      delta={currentDelta}
-                      hasBestLap={bestLapInfo.lap > 0}
+                      delta={activeComparisonMetric.delta}
+                      hasBestLap={Boolean(activeReferenceLap)}
+                      referenceLabel={activeReferenceLap?.hudLabel}
                     />
                   </HudWidgetFrame>
                 )}
@@ -2939,6 +3105,15 @@ export default function Workspace() {
                 </kbd>
                 <span>±1 Frame</span>
               </span>
+              <span className="inline-flex items-center space-x-1">
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  ↑
+                </kbd>
+                <kbd className="inline-flex items-center justify-center min-w-5 px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-zinc-200 font-mono text-[10px] font-bold leading-none">
+                  ↓
+                </kbd>
+                <span>Volume</span>
+              </span>
             </div>
           )}
 
@@ -3077,6 +3252,32 @@ export default function Workspace() {
             </div>
           )}
         </div>
+
+        {localTelemetry && (
+          <ComparisonPanel
+            primaryRacerName={primaryRacerName}
+            primarySessionName={primarySessionName}
+            primaryAnalysis={primaryLapAnalysis}
+            currentLap={currentTelemetry.lap}
+            currentLapElapsed={currentLapElapsed}
+            currentSpeed={currentTelemetry.speed}
+            telemetryLaps={telemetryLaps}
+            comparisonSessions={comparisonSessions}
+            comparisonSelection={comparisonSelection}
+            activeReferenceLap={activeReferenceLap}
+            activeMetric={activeComparisonMetric}
+            sessionLiveMetrics={sessionLiveMetrics}
+            showGhostOnMap={showGhostOnMap}
+            isParsingComparison={isParsingComparison}
+            comparisonError={comparisonError}
+            onToggleGhostOnMap={() => setShowGhostOnMap((prev) => !prev)}
+            onSelectComparison={handleSelectComparison}
+            onAddComparisonCSVs={handleAddComparisonCSVs}
+            onRemoveComparisonSession={handleRemoveComparisonSession}
+            onRenameComparisonSession={handleRenameComparisonSession}
+            onDismissError={() => setComparisonError("")}
+          />
+        )}
       </div>
 
       {/* RIGHT COLUMN: 40% Width - Workspace Control Panel */}

@@ -1,17 +1,15 @@
 "use client";
 
 import React, { useMemo } from "react";
-
-interface GPSPoint {
-  lat: number;
-  lon: number;
-}
+import type { GPSPoint } from "@/utils/telemetry-compare";
 
 interface TrackMapProps {
   gpsPoints: GPSPoint[];
   currentLat: number;
   currentLon: number;
   startFinishCoord?: GPSPoint | null;
+  ghostCoord?: GPSPoint | null;
+  ghostColor?: string;
 }
 
 export default function TrackMap({
@@ -19,14 +17,22 @@ export default function TrackMap({
   currentLat = 0,
   currentLon = 0,
   startFinishCoord = null,
+  ghostCoord = null,
+  ghostColor = "#f59e0b",
 }: TrackMapProps) {
   const validPoints = useMemo(() => {
-    return gpsPoints.filter(p => p.lat !== 0 && p.lon !== 0);
+    return gpsPoints.filter((p) => p.lat !== 0 && p.lon !== 0);
   }, [gpsPoints]);
 
-  const { pathData, currentCoords, hasGPS, sfCoords } = useMemo(() => {
+  const { pathData, currentCoords, ghostCoords, hasGPS, sfCoords } = useMemo(() => {
     if (validPoints.length < 5) {
-      return { pathData: "", currentCoords: null, hasGPS: false, sfCoords: null };
+      return {
+        pathData: "",
+        currentCoords: null,
+        ghostCoords: null,
+        hasGPS: false,
+        sfCoords: null,
+      };
     }
 
     let minLat = Infinity;
@@ -45,7 +51,13 @@ export default function TrackMap({
     const lonSpan = maxLon - minLon;
 
     if (latSpan === 0 || lonSpan === 0) {
-      return { pathData: "", currentCoords: null, hasGPS: false, sfCoords: null };
+      return {
+        pathData: "",
+        currentCoords: null,
+        ghostCoords: null,
+        hasGPS: false,
+        sfCoords: null,
+      };
     }
 
     const svgWidth = 200;
@@ -57,8 +69,14 @@ export default function TrackMap({
     const scale = Math.min(scaleX, scaleY);
 
     const getSvgCoords = (lat: number, lon: number) => {
-      const x = padding + (lon - minLon) * scale + (svgWidth - padding * 2 - lonSpan * scale) / 2;
-      const y = padding + (maxLat - lat) * scale + (svgHeight - padding * 2 - latSpan * scale) / 2;
+      const x =
+        padding +
+        (lon - minLon) * scale +
+        (svgWidth - padding * 2 - lonSpan * scale) / 2;
+      const y =
+        padding +
+        (maxLat - lat) * scale +
+        (svgHeight - padding * 2 - latSpan * scale) / 2;
       return { x, y };
     };
 
@@ -73,20 +91,36 @@ export default function TrackMap({
     });
     path += " Z";
 
-    let curCoords = null;
-    if (currentLat !== 0 && currentLon !== 0) {
-      curCoords = getSvgCoords(currentLat, currentLon);
-    } else {
-      curCoords = getSvgCoords(validPoints[0].lat, validPoints[0].lon);
-    }
+    const curCoords =
+      currentLat !== 0 && currentLon !== 0
+        ? getSvgCoords(currentLat, currentLon)
+        : getSvgCoords(validPoints[0].lat, validPoints[0].lon);
 
     let sfCoords = null;
-    if (startFinishCoord && startFinishCoord.lat !== 0 && startFinishCoord.lon !== 0) {
+    if (
+      startFinishCoord &&
+      startFinishCoord.lat !== 0 &&
+      startFinishCoord.lon !== 0
+    ) {
       sfCoords = getSvgCoords(startFinishCoord.lat, startFinishCoord.lon);
     }
 
-    return { pathData: path, currentCoords: curCoords, hasGPS: true, sfCoords };
-  }, [validPoints, currentLat, currentLon, startFinishCoord]);
+    let projectedGhost = null;
+    if (ghostCoord && ghostCoord.lat !== 0 && ghostCoord.lon !== 0) {
+      const gPt = getSvgCoords(ghostCoord.lat, ghostCoord.lon);
+      if (gPt.x >= -10 && gPt.x <= 210 && gPt.y >= -10 && gPt.y <= 210) {
+        projectedGhost = gPt;
+      }
+    }
+
+    return {
+      pathData: path,
+      currentCoords: curCoords,
+      ghostCoords: projectedGhost,
+      hasGPS: true,
+      sfCoords,
+    };
+  }, [validPoints, currentLat, currentLon, startFinishCoord, ghostCoord]);
 
   return (
     <div className="flex flex-col items-center justify-center w-full h-full text-zinc-100 relative select-none">
@@ -116,6 +150,25 @@ export default function TrackMap({
                 fill="#f43f5e"
                 className="drop-shadow-[0_0_6px_#f43f5e]"
               />
+            )}
+
+            {ghostCoords && (
+              <>
+                <circle
+                  cx={ghostCoords.x}
+                  cy={ghostCoords.y}
+                  r={4.5}
+                  fill={ghostColor}
+                  fillOpacity={0.9}
+                  style={{ filter: `drop-shadow(0 0 6px ${ghostColor})` }}
+                />
+                <circle
+                  cx={ghostCoords.x}
+                  cy={ghostCoords.y}
+                  r={1.4}
+                  fill="#09090b"
+                />
+              </>
             )}
 
             {currentCoords && (

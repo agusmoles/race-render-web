@@ -1,19 +1,14 @@
-export interface TelemetryPoint {
-  time: number;
-  speed: number;
-  rpm: number;
-  latAcc: number;
-  lonAcc: number;
-  lat: number;
-  lon: number;
-  lap: number;
-  distance: number;
-}
+import {
+  evaluateGhostPosition,
+  evaluateReferenceAtProgress,
+  PRIMARY_REFERENCE_ACCENT,
+  PRIMARY_SESSION_ID,
+  type GPSPoint,
+  type ReferenceLapTarget,
+  type TelemetryPoint,
+} from "./telemetry-compare";
 
-export interface GPSPoint {
-  lat: number;
-  lon: number;
-}
+export type { GPSPoint, TelemetryPoint };
 
 export interface LayoutConfig {
   x: number;
@@ -51,6 +46,8 @@ export interface TrackMapProps extends TrackPathData {
   maxSpeed?: number;
   maxRpm?: number;
   telemetryLaps?: number[];
+  referenceLap?: ReferenceLapTarget | null;
+  showGhostOnMap?: boolean;
 }
 
 export interface HUDLayoutConfig {
@@ -450,6 +447,44 @@ export function drawCanvasHUD(
       ctx.shadowBlur = 0;
     }
 
+    const refLap = trackMapProps.referenceLap;
+    if (trackMapProps.showGhostOnMap && refLap?.trackCompatible) {
+      const curElapsed = Math.max(
+        0,
+        (trackMapProps.telemetryTime || 0) - (trackMapProps.lapTimesStarts?.[tel.lap] || 0),
+      );
+      const ghostPt = evaluateGhostPosition(
+        refLap,
+        tel.lap,
+        trackMapProps.telemetryLaps || [],
+        curElapsed,
+      );
+      if (ghostPt) {
+        const { x: gx, y: gy } = projectTrackPoint(ghostPt.lat, ghostPt.lon, trackMapProps);
+        if (
+          gx >= -10 &&
+          gx <= trackMapProps.tSvgW + 10 &&
+          gy >= -10 &&
+          gy <= trackMapProps.tSvgH + 10
+        ) {
+          ctx.save();
+          ctx.globalAlpha = 0.9;
+          ctx.beginPath();
+          ctx.arc(gx, gy, 4.5, 0, 2 * Math.PI);
+          ctx.fillStyle = refLap.accentColor || "#f59e0b";
+          ctx.shadowColor = refLap.accentColor || "#f59e0b";
+          ctx.shadowBlur = 6;
+          ctx.fill();
+          ctx.restore();
+
+          ctx.beginPath();
+          ctx.arc(gx, gy, 1.4, 0, 2 * Math.PI);
+          ctx.fillStyle = "#09090b";
+          ctx.fill();
+        }
+      }
+    }
+
     const activeLat = tel.lat !== 0 && tel.lon !== 0 ? tel.lat : trackMapProps.firstValidPoint?.lat ?? 0;
     const activeLon = tel.lat !== 0 && tel.lon !== 0 ? tel.lon : trackMapProps.firstValidPoint?.lon ?? 0;
     if (activeLat !== 0 && activeLon !== 0) {
@@ -593,87 +628,61 @@ export function drawCanvasHUD(
 
     const bestLapNum = trackMapProps.bestLapNum || 0;
     const bestLapRows = trackMapProps.bestLapRows || [];
-    const hasBestLap = bestLapNum > 0 && bestLapRows.length > 0;
+    const startDistances = trackMapProps.lapTimesStartDistances || {};
+    const starts = trackMapProps.lapTimesStarts || {};
+    const lapDistances = trackMapProps.lapTimesDistances || {};
     const tLaps = trackMapProps.telemetryLaps || [];
-    const isOutLap = tLaps.length > 0 && tel.lap === tLaps[0];
-    const isInLap = tLaps.length > 1 && tel.lap === tLaps[tLaps.length - 1];
 
-    let delta = 0;
-    if (hasBestLap && tel.lap !== bestLapNum && !isOutLap && !isInLap) {
-      const startDistances = trackMapProps.lapTimesStartDistances || {};
-      const starts = trackMapProps.lapTimesStarts || {};
-      const lapDistances = trackMapProps.lapTimesDistances || {};
+    const effectiveRef: ReferenceLapTarget | null =
+      trackMapProps.referenceLap !== undefined
+        ? trackMapProps.referenceLap
+        : bestLapNum > 0 && bestLapRows.length > 0
+          ? {
+              sourceId: PRIMARY_SESSION_ID,
+              isPrimarySession: true,
+              isBestOfSource: true,
+              racerName: "Session Best",
+              lapNum: bestLapNum,
+              lapTime: trackMapProps.lapTimesLaps?.[bestLapNum] || 0,
+              startTime: starts[bestLapNum] || 0,
+              startDistance: startDistances[bestLapNum] || 0,
+              totalDistance: lapDistances[bestLapNum] || 0,
+              hudLabel: `LAP DELTA VS BEST (L${bestLapNum})`,
+              accentColor: PRIMARY_REFERENCE_ACCENT,
+              trackCompatible: true,
+              rows: bestLapRows,
+            }
+          : null;
 
-      const curStartDist = startDistances[tel.lap] || 0;
-      const curStartTime = starts[tel.lap] || 0;
+    const hasReference = Boolean(
+      effectiveRef && effectiveRef.lapNum > 0 && effectiveRef.rows.length > 0,
+    );
+    const curStartDist = startDistances[tel.lap] || 0;
+    const curStartTime = starts[tel.lap] || 0;
+    const elapsedDist = tel.distance - curStartDist;
+    const elapsedTime = (trackMapProps.telemetryTime || 0) - curStartTime;
+    const currentLapTotalDist = lapDistances[tel.lap] || 0;
 
-      const elapsedDist = tel.distance - curStartDist;
-      const elapsedTime = (trackMapProps.telemetryTime || 0) - curStartTime;
-
-      const bestStartDist = startDistances[bestLapNum] || 0;
-      const bestStartTime = starts[bestLapNum] || 0;
-
-      const bestLapTotalDist = lapDistances[bestLapNum] || 0;
-      const currentLapTotalDist = lapDistances[tel.lap] || 0;
-
-      let scaledElapsedDist = elapsedDist;
-      if (bestLapTotalDist > 0 && currentLapTotalDist > 0) {
-        scaledElapsedDist = elapsedDist * (bestLapTotalDist / currentLapTotalDist);
-        scaledElapsedDist = Math.max(0, Math.min(bestLapTotalDist, scaledElapsedDist));
-      }
-
-      let low = 0;
-      let high = bestLapRows.length - 1;
-      let matchIdx = -1;
-
-      while (low <= high) {
-        const mid = Math.floor((low + high) / 2);
-        const midDist = bestLapRows[mid].distance - bestStartDist;
-        if (midDist === scaledElapsedDist) {
-          matchIdx = mid;
-          break;
-        } else if (midDist < scaledElapsedDist) {
-          low = mid + 1;
-        } else {
-          high = mid - 1;
-        }
-      }
-
-      let bestLapTime = 0;
-      if (matchIdx !== -1) {
-        bestLapTime = bestLapRows[matchIdx].time - bestStartTime;
-      } else {
-        const idxB = Math.min(low, bestLapRows.length - 1);
-        const idxA = Math.max(0, idxB - 1);
-        const rowA = bestLapRows[idxA];
-        const rowB = bestLapRows[idxB];
-
-        const distA = rowA.distance - bestStartDist;
-        const distB = rowB.distance - bestStartDist;
-
-        let fraction = 0;
-        if (distB !== distA) {
-          fraction = Math.max(0, Math.min(1, (scaledElapsedDist - distA) / (distB - distA)));
-        }
-
-        const timeA = rowA.time - bestStartTime;
-        const timeB = rowB.time - bestStartTime;
-        bestLapTime = timeA + fraction * (timeB - timeA);
-      }
-
-      delta = elapsedTime - bestLapTime;
-    }
+    const metric = evaluateReferenceAtProgress(
+      effectiveRef,
+      tel.lap,
+      tLaps,
+      elapsedTime,
+      elapsedDist,
+      currentLapTotalDist,
+    );
+    const delta = metric.delta;
 
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     ctx.fillStyle = "#71717a";
     ctx.font = `900 ${3 * cqw}px ${FONT_SANS}`;
-    ctx.fillText("LAP DELTA VS BEST", wX + wW / 2, wY);
+    ctx.fillText(effectiveRef?.hudLabel || "LAP DELTA VS BEST", wX + wW / 2, wY, wW);
 
     let valueStr = "0.00";
     let valColor = "#a1a1aa";
     let valGlow = "rgba(161, 161, 170, 0.2)";
-    if (!hasBestLap) {
+    if (!hasReference) {
       valueStr = "--.--";
       valColor = "#71717a";
       valGlow = "transparent";
@@ -716,7 +725,7 @@ export function drawCanvasHUD(
     ctx.fillStyle = "rgba(63, 63, 70, 0.85)";
     ctx.fillRect(barX + barW / 2 - 0.25 * cqw, barY, 0.5 * cqw, barH);
 
-    if (hasBestLap && delta !== 0) {
+    if (hasReference && delta !== 0) {
       const clampLimit = 2.0;
       const clampedDelta = Math.max(-clampLimit, Math.min(clampLimit, delta));
       const barPercent = Math.abs(clampedDelta) / clampLimit;
