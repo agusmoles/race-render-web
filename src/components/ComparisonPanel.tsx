@@ -450,14 +450,18 @@ export default function ComparisonPanel({
                 ? comparisonSelection.lapNum
                 : session.selectedLapNum;
 
+            const frameBorderColor = isActiveSession
+              ? `${session.color}88`
+              : "rgba(39, 39, 42, 0.85)";
+
             return (
               <div
                 key={session.id}
                 className="bg-zinc-950/70 rounded-2xl p-3.5 space-y-2.5 border transition"
                 style={{
-                  borderColor: isActiveSession
-                    ? `${session.color}88`
-                    : "rgba(39, 39, 42, 0.85)",
+                  borderTopColor: frameBorderColor,
+                  borderRightColor: frameBorderColor,
+                  borderBottomColor: frameBorderColor,
                   borderLeftWidth: "3px",
                   borderLeftColor: session.color,
                 }}
