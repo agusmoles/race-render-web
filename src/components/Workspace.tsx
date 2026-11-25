@@ -2007,10 +2007,9 @@ export default function Workspace() {
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 w-full max-w-7xl px-4 py-6 text-zinc-100 select-none relative">
       {/* EXPORT TRIM PREVIEW MODAL */}
       {isExportModalOpen && videoUrls.length > 0 && (
-        <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
-            {/* Header */}
-            <div className="flex justify-between items-center px-6 py-4 border-b border-zinc-800">
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 overflow-y-auto overscroll-contain animate-in fade-in duration-200">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl flex flex-col max-h-[calc(100dvh-2rem)] my-auto">
+            <div className="shrink-0 flex justify-between items-center px-6 py-4 border-b border-zinc-800">
               <div className="flex flex-col">
                 <div className="flex items-center space-x-2">
                   <Video className="text-cyan-400" size={18} />
@@ -2038,9 +2037,7 @@ export default function Workspace() {
               </button>
             </div>
 
-            {/* Content */}
-            <div className="p-6 flex flex-col space-y-4 overflow-y-auto">
-              {/* Preview player */}
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               <div className="relative aspect-video rounded-2xl overflow-hidden border border-zinc-800 bg-black">
                 <video
                   ref={exportPreviewVideoRef}
@@ -2478,7 +2475,7 @@ export default function Workspace() {
               </div>
             </div>
 
-            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex flex-wrap justify-between items-center gap-3 rounded-b-3xl">
+            <div className="shrink-0 px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex flex-wrap justify-between items-center gap-3 rounded-b-3xl">
               <div className="flex items-center space-x-2">
                 <span className="text-[9px] text-zinc-500 uppercase font-black tracking-wider">Quality:</span>
                 {exportMode === "composite" ? (
@@ -2576,8 +2573,8 @@ export default function Workspace() {
       )}
 
       {isExporting && (
-        <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 p-6">
-          <div className="p-6 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-3xl text-center space-y-5 max-w-xl w-full shadow-2xl relative flex flex-col items-center">
+        <div className="fixed inset-0 bg-zinc-950/95 flex items-center justify-center z-50 p-4 sm:p-6 overflow-y-auto overscroll-contain">
+          <div className="p-6 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-3xl text-center space-y-5 max-w-xl w-full max-h-[calc(100dvh-2rem)] overflow-y-auto my-auto shadow-2xl relative flex flex-col items-center">
             <div className="flex items-center space-x-3">
               <RefreshCw size={24} className="animate-spin text-cyan-400" />
               <div className="text-left">
@@ -2594,7 +2591,7 @@ export default function Workspace() {
               </div>
             </div>
 
-            <div className="relative aspect-video w-full bg-zinc-950 rounded-2xl border border-zinc-850 overflow-hidden shadow-2xl flex items-center justify-center">
+            <div className="shrink-0 relative aspect-video w-full bg-zinc-950 rounded-2xl border border-zinc-850 overflow-hidden shadow-2xl flex items-center justify-center">
               <canvas
                 ref={previewCanvasRef}
                 width={640}
@@ -2653,10 +2650,9 @@ export default function Workspace() {
 
       {/* TELEMETRY SYNC WIZARD MODAL */}
       {isSyncModalOpen && localTelemetry && (
-        <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-5xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
-            {/* Header */}
-            <div className="flex justify-between items-center px-6 py-4 border-b border-zinc-800">
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4 overflow-y-auto overscroll-contain">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-5xl overflow-hidden shadow-2xl flex flex-col max-h-[calc(100dvh-2rem)] my-auto">
+            <div className="shrink-0 flex justify-between items-center px-6 py-4 border-b border-zinc-800">
               <div className="flex flex-col">
                 <div className="flex items-center space-x-2">
                   <Sliders className="text-cyan-400" size={18} />
@@ -2677,8 +2673,7 @@ export default function Workspace() {
               </button>
             </div>
 
-            {/* Main content splitter (3 columns: Video Scanner, Telemetry Scanner, Live Circuit Map) */}
-            <div className="grid grid-cols-1 md:grid-cols-12 overflow-y-auto">
+            <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-12 overflow-y-auto overscroll-contain">
               {/* Left Panel (Col 4): Video Scanner */}
               <div className="md:col-span-4 p-6 border-b md:border-b-0 md:border-r border-zinc-800 flex flex-col space-y-4">
                 <h4 className="text-xs font-extrabold uppercase text-cyan-400 tracking-wider flex items-center space-x-1.5">
@@ -3008,7 +3003,7 @@ export default function Workspace() {
               </div>
             </div>
 
-            <div className="bg-zinc-950/60 px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between space-y-3 md:space-y-0 border-t border-zinc-800">
+            <div className="shrink-0 bg-zinc-950/60 px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between space-y-3 md:space-y-0 border-t border-zinc-800">
               <div className="text-[10px] text-zinc-450 uppercase font-semibold flex flex-wrap items-center gap-x-3 gap-y-1">
                 <div className="flex items-center space-x-1.5">
                   <Zap size={14} className="text-cyan-400 animate-bounce" />
