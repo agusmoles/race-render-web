@@ -303,3 +303,27 @@ export function formatResolutionTag(width: number, height: number): string {
   if (width >= 1200 || height >= 700) return "720p";
   return `${width}×${height}`;
 }
+
+export function premultiplyRgbaOverBlack(data: Uint8ClampedArray | Uint8Array): void {
+  const pixelCount = Math.floor(data.length / 4);
+  const canUseU32 = data.byteOffset % 4 === 0 && data.byteLength >= pixelCount * 4;
+  const u32 = canUseU32
+    ? new Uint32Array(data.buffer, data.byteOffset, pixelCount)
+    : null;
+
+  for (let p = 0; p < pixelCount; p++) {
+    if (u32 && u32[p] === 0) continue;
+    const i = p * 4;
+    const a = data[i + 3];
+    if (a === 255) continue;
+    if (a === 0) {
+      data[i] = 0;
+      data[i + 1] = 0;
+      data[i + 2] = 0;
+      continue;
+    }
+    data[i] = ((data[i] * a + 127) / 255) | 0;
+    data[i + 1] = ((data[i + 1] * a + 127) / 255) | 0;
+    data[i + 2] = ((data[i + 2] * a + 127) / 255) | 0;
+  }
+}

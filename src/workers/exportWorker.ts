@@ -6,6 +6,8 @@ import {
   BufferTarget,
   StreamTarget,
   CanvasSource,
+  VideoSampleSource,
+  VideoSample,
   EncodedAudioPacketSource,
   EncodedPacketSink,
   CanvasSink,
@@ -32,6 +34,7 @@ import {
   buildPresentationFrameTimings,
   getContainerForCodec,
   normalizeEvenDimension,
+  premultiplyRgbaOverBlack,
   sanitizeBitrate,
   selectBestVideoEncoder,
   type ExportContainer,
@@ -474,7 +477,10 @@ async function run(payload: WorkerInitPayload) {
     const usesMp4 = container === "mp4";
 
     const offscreen = new OffscreenCanvas(evenWidth, evenHeight);
-    const ctx = offscreen.getContext("2d", { alpha: isAlphaOverlay })!;
+    const ctx = offscreen.getContext("2d", {
+      alpha: isAlphaOverlay,
+      willReadFrequently: isAlphaOverlay,
+    })!;
 
     const previewW = 640;
     const previewH = 360;
@@ -503,14 +509,29 @@ async function run(payload: WorkerInitPayload) {
 
     output = new Output({ format: outputFormat, target });
 
-    const canvasSource = new CanvasSource(offscreen, {
-      codec: videoCodec,
-      bitrate: effectiveBitrate,
-      keyFrameInterval: 2,
-      latencyMode: "quality",
-      ...(isAlphaOverlay ? { alpha: "keep" as const } : {}),
-    });
-    output.addVideoTrack(canvasSource);
+    const videoSampleSource = isAlphaOverlay
+      ? new VideoSampleSource({
+          codec: videoCodec,
+          bitrate: effectiveBitrate,
+          keyFrameInterval: 2,
+          latencyMode: "quality",
+          alpha: "keep",
+        })
+      : null;
+    const canvasSource = isAlphaOverlay
+      ? null
+      : new CanvasSource(offscreen, {
+          codec: videoCodec,
+          bitrate: effectiveBitrate,
+          keyFrameInterval: 2,
+          latencyMode: "quality",
+        });
+
+    if (videoSampleSource) {
+      output.addVideoTrack(videoSampleSource);
+    } else if (canvasSource) {
+      output.addVideoTrack(canvasSource);
+    }
 
     let audioSource: EncodedAudioPacketSource | null = null;
     let audioCodecName: string | null = null;
@@ -616,7 +637,24 @@ async function run(payload: WorkerInitPayload) {
         await flushPendingAudio();
       }
 
-      await canvasSource.add(exportRelativeTs, frameDuration);
+      if (videoSampleSource) {
+        const imageData = ctx.getImageData(0, 0, evenWidth, evenHeight);
+        premultiplyRgbaOverBlack(imageData.data);
+        const sample = new VideoSample(imageData.data, {
+          format: "RGBA",
+          codedWidth: evenWidth,
+          codedHeight: evenHeight,
+          timestamp: exportRelativeTs,
+          duration: frameDuration,
+        });
+        try {
+          await videoSampleSource.add(sample);
+        } finally {
+          sample.close();
+        }
+      } else if (canvasSource) {
+        await canvasSource.add(exportRelativeTs, frameDuration);
+      }
 
       const percent = Math.round(
         Math.min(100, Math.max(0, (exportRelativeTs / totalExportDuration) * 100)),

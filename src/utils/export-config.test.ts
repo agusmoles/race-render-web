@@ -10,6 +10,7 @@ import {
   getCandidateCodecs,
   getContainerForCodec,
   normalizeEvenDimension,
+  premultiplyRgbaOverBlack,
   sanitizeBitrate,
   selectBestVideoEncoder,
 } from "./export-config";
@@ -194,5 +195,23 @@ describe("export-config", () => {
     assert.equal(formatResolutionTag(5312, 2988), "5.3K");
     assert.equal(formatResolutionTag(3840, 2160), "4K");
     assert.equal(formatResolutionTag(1920, 1080), "1080p");
+  });
+
+  it("premultiplies semi-transparent RGB over black while preserving alpha channel", () => {
+    const pixels = new Uint8ClampedArray([
+      255, 255, 255, 0,
+      255, 255, 255, 51,
+      161, 161, 170, 51,
+      34, 211, 238, 128,
+      244, 63, 94, 255,
+    ]);
+    premultiplyRgbaOverBlack(pixels);
+    assert.deepEqual(Array.from(pixels), [
+      0, 0, 0, 0,
+      51, 51, 51, 51,
+      32, 32, 34, 51,
+      17, 106, 119, 128,
+      244, 63, 94, 255,
+    ]);
   });
 });
