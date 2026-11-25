@@ -12,11 +12,13 @@ import {
   BlobSource,
   ALL_FORMATS,
   QUALITY_VERY_HIGH,
-  getFirstEncodableVideoCodec,
+  canEncodeVideo,
   EncodedPacket,
   type StreamTargetChunk,
   type Target,
   type Quality,
+  type VideoCodec,
+  type InputVideoTrack,
 } from "mediabunny";
 import {
   buildTrackPath,
@@ -26,6 +28,19 @@ import {
   type TrackMapProps,
   type HUDLayoutConfig,
 } from "../utils/hud-draw";
+import {
+  buildPresentationFrameTimings,
+  getContainerForCodec,
+  normalizeEvenDimension,
+  sanitizeBitrate,
+  selectBestVideoEncoder,
+  type ExportContainer,
+  type ExportEncodingInfo,
+  type ExportMode,
+  type ExportQualityPreset,
+  type FrameTimingSample,
+  type SourceVideoProfile,
+} from "../utils/export-config";
 import type { ReferenceLapTarget } from "../utils/telemetry-compare";
 
 interface TelemetryRow {
@@ -62,7 +77,11 @@ interface WorkerInitPayload {
   canvasWidth: number;
   canvasHeight: number;
   videoDurations: number[];
-  targetBitrate: number;
+  exportMode?: ExportMode;
+  exportQuality?: ExportQualityPreset;
+  preferredContainer?: ExportContainer | null;
+  sourceProfile?: SourceVideoProfile | null;
+  fileHandle?: FileSystemFileHandle;
   writableStream?: WritableStream<StreamTargetChunk>;
   referenceLap?: ReferenceLapTarget | null;
   showGhostOnMap?: boolean;
@@ -70,6 +89,8 @@ interface WorkerInitPayload {
 
 const GOOGLE_FONTS_CSS_URL =
   "https://fonts.googleapis.com/css2?family=Orbitron:wght@450;700;900&family=Inter:wght@350;500;700;900&display=swap";
+
+const MAX_SOURCE_BITRATE_CAP = 500_000_000;
 
 let fontsLoadPromise: Promise<void> | null = null;
 let cancelled = false;
@@ -114,7 +135,7 @@ async function ensureWorkerFonts(): Promise<void> {
         }
       }
     } catch {
-      // Ignore network/offline errors and fall back to system fonts
+      return;
     } finally {
       clearTimeout(timer);
     }
@@ -216,6 +237,120 @@ function disposeInputs(inputs: Input[]) {
   }
 }
 
+function drawPreviewCheckerboard(
+  ctx: OffscreenCanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+) {
+  const tile = 12;
+  ctx.fillStyle = "#18181b";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#27272a";
+  for (let row = 0; row * tile < h; row++) {
+    for (let col = (row % 2 === 0 ? 0 : 1); col * tile < w; col += 2) {
+      const rx = x + col * tile;
+      const ry = y + row * tile;
+      ctx.fillRect(rx, ry, Math.min(tile, x + w - rx), Math.min(tile, y + h - ry));
+    }
+  }
+}
+
+async function inspectSourceTrack(
+  track: InputVideoTrack,
+  fallbackWidth: number,
+  fallbackHeight: number,
+  fallbackProfile: SourceVideoProfile | null | undefined,
+): Promise<SourceVideoProfile> {
+  const codec: VideoCodec | null = (await track.getCodec()) ?? fallbackProfile?.codec ?? null;
+
+  let displayW = fallbackWidth;
+  let displayH = fallbackHeight;
+  try {
+    const trackW = await track.getDisplayWidth();
+    const trackH = await track.getDisplayHeight();
+    if (trackW >= 2 && trackH >= 2) {
+      displayW = trackW;
+      displayH = trackH;
+    }
+  } catch {
+    displayW = fallbackProfile?.width || fallbackWidth;
+    displayH = fallbackProfile?.height || fallbackHeight;
+  }
+
+  let measuredBitrate: number | null = null;
+  let measuredFps: number | null = null;
+  try {
+    const stats = await track.computePacketStats(240);
+    measuredBitrate = sanitizeBitrate(stats.averageBitrate, MAX_SOURCE_BITRATE_CAP);
+    if (Number.isFinite(stats.averagePacketRate) && stats.averagePacketRate >= 1 && stats.averagePacketRate <= 240) {
+      measuredFps = stats.averagePacketRate;
+    }
+  } catch {
+    measuredBitrate = null;
+  }
+
+  if (measuredBitrate === null) {
+    try {
+      const avg = await track.getAverageBitrate();
+      measuredBitrate = sanitizeBitrate(avg, MAX_SOURCE_BITRATE_CAP);
+    } catch {
+      measuredBitrate = null;
+    }
+  }
+
+  if (measuredBitrate === null) {
+    try {
+      const peak = await track.getBitrate();
+      measuredBitrate = sanitizeBitrate(peak, MAX_SOURCE_BITRATE_CAP);
+    } catch {
+      measuredBitrate = null;
+    }
+  }
+
+  return {
+    codec,
+    bitrate: measuredBitrate ?? sanitizeBitrate(fallbackProfile?.bitrate, MAX_SOURCE_BITRATE_CAP),
+    width: normalizeEvenDimension(displayW, 1920),
+    height: normalizeEvenDimension(displayH, 1080),
+    fps: measuredFps ?? fallbackProfile?.fps ?? null,
+  };
+}
+
+async function collectClipFrameTimings(
+  videoTrack: InputVideoTrack,
+  clipStart: number,
+  clipEnd: number,
+  fallbackFps: number | null,
+): Promise<FrameTimingSample[]> {
+  const rawSamples: FrameTimingSample[] = [];
+  try {
+    const packetSink = new EncodedPacketSink(videoTrack);
+    const startPacket =
+      clipStart > 1
+        ? await packetSink.getKeyPacket(Math.max(0, clipStart - 1), { metadataOnly: true })
+        : null;
+    for await (const pkt of packetSink.packets(startPacket ?? undefined, undefined, {
+      metadataOnly: true,
+    })) {
+      if (cancelled) return [];
+      if (pkt.timestamp >= clipStart - 1 && pkt.timestamp <= clipEnd + 1) {
+        rawSamples.push({
+          timestamp: pkt.timestamp,
+          duration: pkt.duration || 0,
+        });
+      } else if (pkt.timestamp > clipEnd + 2 && rawSamples.length > 0) {
+        break;
+      }
+    }
+  } catch {
+    rawSamples.length = 0;
+  }
+
+  return buildPresentationFrameTimings(rawSamples, clipStart, clipEnd, fallbackFps);
+}
+
 async function run(payload: WorkerInitPayload) {
   cancelled = false;
   await ensureWorkerFonts();
@@ -242,183 +377,196 @@ async function run(payload: WorkerInitPayload) {
     canvasWidth,
     canvasHeight,
     videoDurations,
-    targetBitrate,
+    exportMode = "composite",
+    exportQuality = "high",
+    preferredContainer = null,
+    sourceProfile: incomingProfile = null,
+    fileHandle,
     writableStream,
     referenceLap,
     showGhostOnMap,
   } = payload;
 
-  const trackSourcePoints =
-    gpsPoints.length > 0 ? gpsPoints : telemetryRows.map((r) => ({ lat: r.lat, lon: r.lon }));
-  const trackMapBase = buildTrackPath(trackSourcePoints);
-  const totalExportDuration = Math.max(0.001, exportEnd - exportStart);
-
-  const evenWidth = Math.max(2, Math.floor(canvasWidth / 2) * 2);
-  const evenHeight = Math.max(2, Math.floor(canvasHeight / 2) * 2);
-  const pixelScale = Math.max(1, (evenWidth * evenHeight) / (1920 * 1080));
-  const scaledBitrate = Math.min(120_000_000, Math.round((targetBitrate || 30_000_000) * pixelScale));
-
-  const offscreen = new OffscreenCanvas(evenWidth, evenHeight);
-  const ctx = offscreen.getContext("2d")!;
-
-  const previewW = 640;
-  const previewH = 360;
-  const previewCanvas = new OffscreenCanvas(previewW, previewH);
-  const previewCtx = previewCanvas.getContext("2d")!;
-  const previewScale = Math.min(previewW / evenWidth, previewH / evenHeight);
-  const previewDrawW = Math.round(evenWidth * previewScale);
-  const previewDrawH = Math.round(evenHeight * previewScale);
-  const previewDrawX = Math.round((previewW - previewDrawW) / 2);
-  const previewDrawY = Math.round((previewH - previewDrawH) / 2);
-
-  let videoCodec = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"], {
-    width: evenWidth,
-    height: evenHeight,
-    bitrate: scaledBitrate,
-  });
-  let effectiveBitrate: number | Quality = scaledBitrate;
-
-  if (!videoCodec) {
-    videoCodec = await getFirstEncodableVideoCodec(["avc", "vp9", "vp8"]);
-    effectiveBitrate = QUALITY_VERY_HIGH;
-  }
-
-  if (!videoCodec) {
-    self.postMessage({
-      type: "error",
-      message: "No hardware-accelerated video codec found. Your browser may not support WebCodecs.",
-    });
-    return;
-  }
-
-  const usesMp4 = videoCodec === "avc";
-  const outputFormat = usesMp4 ? new Mp4OutputFormat() : new WebMOutputFormat();
-  const target: Target = writableStream
-    ? new StreamTarget(writableStream, { chunked: true })
-    : new BufferTarget();
-
-  const output = new Output({ format: outputFormat, target });
-
-  const canvasSource = new CanvasSource(offscreen, {
-    codec: videoCodec,
-    bitrate: effectiveBitrate,
-    keyFrameInterval: 2,
-    latencyMode: "quality",
-  });
-  output.addVideoTrack(canvasSource);
-
+  const isAlphaOverlay = exportMode === "overlay-alpha";
   const inputs: Input[] = videoFiles.map(
     (blob) => new Input({ source: new BlobSource(blob), formats: ALL_FORMATS }),
   );
 
-  let audioSource: EncodedAudioPacketSource | null = null;
-  let audioCodecName: string | null = null;
-  const supportedAudioCodecs = outputFormat.getSupportedAudioCodecs();
+  let ownedWritable: FileSystemWritableFileStream | null = null;
+  let output: Output | null = null;
+  let outputStarted = false;
 
-  if (inputs.length > 0) {
-    const firstAudioTrack = await inputs[0].getPrimaryAudioTrack();
-    if (firstAudioTrack) {
-      const firstAudioCodec = await firstAudioTrack.getCodec();
-      if (firstAudioCodec && supportedAudioCodecs.includes(firstAudioCodec)) {
-        audioCodecName = firstAudioCodec;
-        audioSource = new EncodedAudioPacketSource(firstAudioCodec);
-        output.addAudioTrack(audioSource);
+  const abortAndDispose = async (sendCancelled: boolean) => {
+    try {
+      if (output && outputStarted) {
+        await output.cancel();
+      } else if (ownedWritable) {
+        await ownedWritable.abort();
+      }
+    } catch {
+      // ignore cleanup errors on cancel
+    } finally {
+      disposeInputs(inputs);
+    }
+    if (sendCancelled) {
+      self.postMessage({ type: "cancelled" });
+    }
+  };
+
+  try {
+    let sourceProfile: SourceVideoProfile = {
+      codec: incomingProfile?.codec ?? null,
+      bitrate: sanitizeBitrate(incomingProfile?.bitrate, MAX_SOURCE_BITRATE_CAP),
+      width: normalizeEvenDimension(incomingProfile?.width || canvasWidth, 1280),
+      height: normalizeEvenDimension(incomingProfile?.height || canvasHeight, 720),
+      fps: incomingProfile?.fps ?? null,
+    };
+
+    for (const input of inputs) {
+      const firstTrack = await input.getPrimaryVideoTrack();
+      if (firstTrack) {
+        sourceProfile = await inspectSourceTrack(
+          firstTrack,
+          canvasWidth,
+          canvasHeight,
+          incomingProfile,
+        );
+        break;
       }
     }
-  }
 
-  await output.start();
+    const evenWidth = sourceProfile.width;
+    const evenHeight = sourceProfile.height;
 
-  const bestLapTimeStr = formatLapTime(lapTimesLaps[bestLapNum] || 0);
-  const bestLapRowsTyped = bestLapRows as TelemetryPoint[];
+    const chosenEncoder = await selectBestVideoEncoder({
+      mode: exportMode,
+      quality: exportQuality,
+      sourceCodec: sourceProfile.codec,
+      sourceBitrate: sourceProfile.bitrate,
+      width: evenWidth,
+      height: evenHeight,
+      preferredContainer: isAlphaOverlay ? "webm" : preferredContainer,
+      canEncode: (codec, bitrate) =>
+        canEncodeVideo(codec, {
+          width: evenWidth,
+          height: evenHeight,
+          bitrate: bitrate ?? QUALITY_VERY_HIGH,
+          latencyMode: "quality",
+        }),
+    });
 
-  let globalFrameIndex = 0;
-  let cumulativeVideoOffset = 0;
-  const gHistory: { x: number; y: number }[] = [];
-  let lastVideoOutTs = -1;
-  let clipAudioMinTs = 0;
-  let lastAudioEndTs = 0;
-  let isFirstAudioChunk = true;
-  let lastPercent = -1;
-
-  for (let vi = 0; vi < inputs.length; vi++) {
-    if (cancelled) {
-      await output.cancel();
-      disposeInputs(inputs);
+    if (!chosenEncoder) {
+      await abortAndDispose(false);
+      self.postMessage({
+        type: "error",
+        message: isAlphaOverlay
+          ? "Your browser does not support WebCodecs VP9/VP8 encoding required for transparent HUD overlays."
+          : "No hardware-accelerated video codec found. Your browser may not support WebCodecs.",
+      });
       return;
     }
 
-    const input = inputs[vi];
-    const videoDuration = videoDurations[vi] ?? 0;
-    const videoStartInGlobal = cumulativeVideoOffset;
-    const videoTrack = await input.getPrimaryVideoTrack();
+    const videoCodec = chosenEncoder.codec;
+    const effectiveBitrate: number | Quality = chosenEncoder.bitrate ?? QUALITY_VERY_HIGH;
+    const container: ExportContainer = isAlphaOverlay
+      ? "webm"
+      : getContainerForCodec(videoCodec);
+    const usesMp4 = container === "mp4";
 
-    if (!videoTrack) {
-      cumulativeVideoOffset += videoDuration;
-      continue;
+    const offscreen = new OffscreenCanvas(evenWidth, evenHeight);
+    const ctx = offscreen.getContext("2d", { alpha: isAlphaOverlay })!;
+
+    const previewW = 640;
+    const previewH = 360;
+    const previewCanvas = new OffscreenCanvas(previewW, previewH);
+    const previewCtx = previewCanvas.getContext("2d")!;
+    const previewScale = Math.min(previewW / evenWidth, previewH / evenHeight);
+    const previewDrawW = Math.round(evenWidth * previewScale);
+    const previewDrawH = Math.round(evenHeight * previewScale);
+    const previewDrawX = Math.round((previewW - previewDrawW) / 2);
+    const previewDrawY = Math.round((previewH - previewDrawH) / 2);
+
+    const outputFormat = usesMp4 ? new Mp4OutputFormat() : new WebMOutputFormat();
+    let target: Target;
+    let streamingToDisk = false;
+
+    if (fileHandle) {
+      ownedWritable = await fileHandle.createWritable();
+      target = new StreamTarget(ownedWritable, { chunked: true });
+      streamingToDisk = true;
+    } else if (writableStream) {
+      target = new StreamTarget(writableStream, { chunked: true });
+      streamingToDisk = true;
+    } else {
+      target = new BufferTarget();
     }
 
-    const clipStart = Math.max(0, exportStart - videoStartInGlobal);
-    const clipEnd = Math.min(videoDuration, exportEnd - videoStartInGlobal);
+    output = new Output({ format: outputFormat, target });
 
-    if (clipEnd <= clipStart) {
-      cumulativeVideoOffset += videoDuration;
-      continue;
+    const canvasSource = new CanvasSource(offscreen, {
+      codec: videoCodec,
+      bitrate: effectiveBitrate,
+      keyFrameInterval: 2,
+      latencyMode: "quality",
+      ...(isAlphaOverlay ? { alpha: "keep" as const } : {}),
+    });
+    output.addVideoTrack(canvasSource);
+
+    let audioSource: EncodedAudioPacketSource | null = null;
+    let audioCodecName: string | null = null;
+
+    if (!isAlphaOverlay && inputs.length > 0) {
+      const supportedAudioCodecs = outputFormat.getSupportedAudioCodecs();
+      const firstAudioTrack = await inputs[0].getPrimaryAudioTrack();
+      if (firstAudioTrack) {
+        const firstAudioCodec = await firstAudioTrack.getCodec();
+        if (firstAudioCodec && supportedAudioCodecs.includes(firstAudioCodec)) {
+          audioCodecName = firstAudioCodec;
+          audioSource = new EncodedAudioPacketSource(firstAudioCodec);
+          output.addAudioTrack(audioSource);
+        }
+      }
     }
 
-    const canvasSink = new CanvasSink(videoTrack, {
-      poolSize: 2,
+    const encodingInfo: ExportEncodingInfo = {
+      mode: exportMode,
+      quality: exportQuality,
+      codec: videoCodec,
+      container,
+      bitrate: chosenEncoder.bitrate ?? "auto",
       width: evenWidth,
       height: evenHeight,
-      fit: "cover",
-    });
-
-    let audioPacketSink: EncodedPacketSink | null = null;
-    let nextAudioPacket: EncodedPacket | null = null;
-    let audioDecoderConfig: AudioDecoderConfig | null = null;
-
-    if (audioSource && audioCodecName) {
-      const audioTrack = await input.getPrimaryAudioTrack();
-      if (audioTrack && (await audioTrack.getCodec()) === audioCodecName) {
-        audioPacketSink = new EncodedPacketSink(audioTrack);
-        nextAudioPacket = await audioPacketSink.getPacket(clipStart);
-        if (!nextAudioPacket) {
-          nextAudioPacket = await audioPacketSink.getFirstPacket();
-        }
-        audioDecoderConfig = await audioTrack.getDecoderConfig();
-      }
-    }
-
-    const flushAudioPacket = async (pkt: EncodedPacket) => {
-      if (!audioSource) return;
-      const globalAudioTs = videoStartInGlobal + pkt.timestamp;
-      const exportRelativeAudioTs = globalAudioTs - exportStart;
-      const safeAudioTs = Math.max(clipAudioMinTs, exportRelativeAudioTs);
-      clipAudioMinTs = safeAudioTs + 1e-6;
-      lastAudioEndTs = Math.max(lastAudioEndTs, safeAudioTs + Math.max(0, pkt.duration || 0));
-
-      const adjustedPacket = pkt.clone({ timestamp: safeAudioTs });
-      if (isFirstAudioChunk) {
-        await audioSource.add(adjustedPacket, { decoderConfig: audioDecoderConfig || undefined });
-        isFirstAudioChunk = false;
-      } else {
-        await audioSource.add(adjustedPacket);
-      }
+      streamingToDisk,
+      sourceBitrate: sourceProfile.bitrate,
+      sourceCodec: sourceProfile.codec,
     };
+    self.postMessage({ type: "info", info: encodingInfo });
 
-    for await (const wrappedCanvas of canvasSink.canvases(clipStart, clipEnd)) {
-      if (cancelled) {
-        await output.cancel();
-        disposeInputs(inputs);
-        return;
-      }
+    await output.start();
+    outputStarted = true;
 
-      const localFrameTs = wrappedCanvas.timestamp;
-      if (localFrameTs < clipStart) {
-        continue;
-      }
+    const trackSourcePoints =
+      gpsPoints.length > 0 ? gpsPoints : telemetryRows.map((r) => ({ lat: r.lat, lon: r.lon }));
+    const trackMapBase = buildTrackPath(trackSourcePoints);
+    const totalExportDuration = Math.max(0.001, exportEnd - exportStart);
+    const bestLapTimeStr = formatLapTime(lapTimesLaps[bestLapNum] || 0);
+    const bestLapRowsTyped = bestLapRows as TelemetryPoint[];
 
-      const globalVideoTs = videoStartInGlobal + localFrameTs;
+    let globalFrameIndex = 0;
+    let cumulativeVideoOffset = 0;
+    const gHistory: { x: number; y: number }[] = [];
+    let lastVideoOutTs = -1;
+    let clipAudioMinTs = 0;
+    let lastAudioEndTs = 0;
+    let isFirstAudioChunk = true;
+    let lastPercent = -1;
+
+    const encodeHudFrame = async (
+      globalVideoTs: number,
+      frameDuration: number,
+      drawSourceFrame?: () => void,
+      flushPendingAudio?: () => Promise<void>,
+    ) => {
       const rawExportRelativeTs = globalVideoTs - exportStart;
       const exportRelativeTs =
         lastVideoOutTs < 0
@@ -427,7 +575,9 @@ async function run(payload: WorkerInitPayload) {
       lastVideoOutTs = exportRelativeTs;
 
       ctx.clearRect(0, 0, evenWidth, evenHeight);
-      ctx.drawImage(wrappedCanvas.canvas, 0, 0, evenWidth, evenHeight);
+      if (drawSourceFrame) {
+        drawSourceFrame();
+      }
 
       const telemetryTime = (globalVideoTs - syncOffset) * speedScale;
       const tel = interpolateTelemetry(telemetryRows, telemetryTime);
@@ -462,17 +612,8 @@ async function run(payload: WorkerInitPayload) {
 
       drawCanvasHUD(ctx, evenWidth, evenHeight, tel, gHistory, trackMapProps, layoutConfig);
 
-      const frameDuration = wrappedCanvas.duration ?? 1 / 60;
-
-      if (audioSource && audioPacketSink && nextAudioPacket) {
-        while (
-          nextAudioPacket &&
-          nextAudioPacket.timestamp <= localFrameTs &&
-          nextAudioPacket.timestamp <= clipEnd
-        ) {
-          await flushAudioPacket(nextAudioPacket);
-          nextAudioPacket = await audioPacketSink.getNextPacket(nextAudioPacket);
-        }
+      if (flushPendingAudio) {
+        await flushPendingAudio();
       }
 
       await canvasSource.add(exportRelativeTs, frameDuration);
@@ -483,6 +624,15 @@ async function run(payload: WorkerInitPayload) {
 
       if (globalFrameIndex % 15 === 0) {
         previewCtx.clearRect(0, 0, previewW, previewH);
+        if (isAlphaOverlay) {
+          drawPreviewCheckerboard(
+            previewCtx,
+            previewDrawX,
+            previewDrawY,
+            previewDrawW,
+            previewDrawH,
+          );
+        }
         previewCtx.drawImage(offscreen, previewDrawX, previewDrawY, previewDrawW, previewDrawH);
         const previewBitmap = previewCanvas.transferToImageBitmap();
         self.postMessage(
@@ -496,43 +646,175 @@ async function run(payload: WorkerInitPayload) {
       }
 
       globalFrameIndex++;
-    }
+    };
 
-    if (audioSource && audioPacketSink && nextAudioPacket) {
-      while (nextAudioPacket && nextAudioPacket.timestamp <= clipEnd) {
-        await flushAudioPacket(nextAudioPacket);
-        nextAudioPacket = await audioPacketSink.getNextPacket(nextAudioPacket);
+    for (let vi = 0; vi < inputs.length; vi++) {
+      if (cancelled) {
+        await abortAndDispose(true);
+        return;
       }
+
+      const input = inputs[vi];
+      const videoDuration = videoDurations[vi] ?? 0;
+      const videoStartInGlobal = cumulativeVideoOffset;
+      const videoTrack = await input.getPrimaryVideoTrack();
+
+      if (!videoTrack) {
+        cumulativeVideoOffset += videoDuration;
+        continue;
+      }
+
+      const clipStart = Math.max(0, exportStart - videoStartInGlobal);
+      const clipEnd = Math.min(videoDuration, exportEnd - videoStartInGlobal);
+
+      if (clipEnd <= clipStart) {
+        cumulativeVideoOffset += videoDuration;
+        continue;
+      }
+
+      if (isAlphaOverlay) {
+        const frameTimings = await collectClipFrameTimings(
+          videoTrack,
+          clipStart,
+          clipEnd,
+          sourceProfile.fps,
+        );
+        if (cancelled) {
+          await abortAndDispose(true);
+          return;
+        }
+
+        for (const frame of frameTimings) {
+          if (cancelled) {
+            await abortAndDispose(true);
+            return;
+          }
+          await encodeHudFrame(videoStartInGlobal + frame.timestamp, frame.duration);
+        }
+
+        cumulativeVideoOffset += videoDuration;
+        continue;
+      }
+
+      const canvasSink = new CanvasSink(videoTrack, {
+        poolSize: 2,
+        width: evenWidth,
+        height: evenHeight,
+        fit: "cover",
+      });
+
+      let audioPacketSink: EncodedPacketSink | null = null;
+      let nextAudioPacket: EncodedPacket | null = null;
+      let audioDecoderConfig: AudioDecoderConfig | null = null;
+
+      if (audioSource && audioCodecName) {
+        const audioTrack = await input.getPrimaryAudioTrack();
+        if (audioTrack && (await audioTrack.getCodec()) === audioCodecName) {
+          audioPacketSink = new EncodedPacketSink(audioTrack);
+          nextAudioPacket = await audioPacketSink.getPacket(clipStart);
+          if (!nextAudioPacket) {
+            nextAudioPacket = await audioPacketSink.getFirstPacket();
+          }
+          audioDecoderConfig = await audioTrack.getDecoderConfig();
+        }
+      }
+
+      const flushAudioPacket = async (pkt: EncodedPacket) => {
+        if (!audioSource) return;
+        const globalAudioTs = videoStartInGlobal + pkt.timestamp;
+        const exportRelativeAudioTs = globalAudioTs - exportStart;
+        const safeAudioTs = Math.max(clipAudioMinTs, exportRelativeAudioTs);
+        clipAudioMinTs = safeAudioTs + 1e-6;
+        lastAudioEndTs = Math.max(lastAudioEndTs, safeAudioTs + Math.max(0, pkt.duration || 0));
+
+        const adjustedPacket = pkt.clone({ timestamp: safeAudioTs });
+        if (isFirstAudioChunk) {
+          await audioSource.add(adjustedPacket, { decoderConfig: audioDecoderConfig || undefined });
+          isFirstAudioChunk = false;
+        } else {
+          await audioSource.add(adjustedPacket);
+        }
+      };
+
+      for await (const wrappedCanvas of canvasSink.canvases(clipStart, clipEnd)) {
+        if (cancelled) {
+          await abortAndDispose(true);
+          return;
+        }
+
+        const localFrameTs = wrappedCanvas.timestamp;
+        if (localFrameTs < clipStart) {
+          continue;
+        }
+
+        const frameDuration = wrappedCanvas.duration ?? 1 / (sourceProfile.fps || 60);
+
+        await encodeHudFrame(
+          videoStartInGlobal + localFrameTs,
+          frameDuration,
+          () => {
+            ctx.drawImage(wrappedCanvas.canvas, 0, 0, evenWidth, evenHeight);
+          },
+          audioSource && audioPacketSink && nextAudioPacket
+            ? async () => {
+                while (
+                  nextAudioPacket &&
+                  nextAudioPacket.timestamp <= localFrameTs &&
+                  nextAudioPacket.timestamp <= clipEnd
+                ) {
+                  await flushAudioPacket(nextAudioPacket);
+                  nextAudioPacket = await audioPacketSink!.getNextPacket(nextAudioPacket);
+                }
+              }
+            : undefined,
+        );
+      }
+
+      if (audioSource && audioPacketSink && nextAudioPacket) {
+        while (nextAudioPacket && nextAudioPacket.timestamp <= clipEnd) {
+          await flushAudioPacket(nextAudioPacket);
+          nextAudioPacket = await audioPacketSink.getNextPacket(nextAudioPacket);
+        }
+      }
+
+      clipAudioMinTs = Math.max(clipAudioMinTs, lastAudioEndTs);
+      cumulativeVideoOffset += videoDuration;
     }
 
-    clipAudioMinTs = Math.max(clipAudioMinTs, lastAudioEndTs);
-    cumulativeVideoOffset += videoDuration;
-  }
-
-  if (cancelled) {
-    await output.cancel();
-    disposeInputs(inputs);
-    return;
-  }
-
-  await output.finalize();
-  disposeInputs(inputs);
-
-  const mimeType = usesMp4 ? "video/mp4" : "video/webm";
-  const fileExt = usesMp4 ? "mp4" : "webm";
-
-  if (target instanceof BufferTarget) {
-    const { buffer } = target;
-    if (!buffer) {
-      self.postMessage({
-        type: "error",
-        message: "Export buffer is empty. Something went wrong during encoding.",
-      });
+    if (cancelled) {
+      await abortAndDispose(true);
       return;
     }
-    self.postMessage({ type: "done", buffer, mimeType, fileExt }, { transfer: [buffer] });
-  } else {
-    self.postMessage({ type: "done", mimeType, fileExt });
+
+    await output.finalize();
+    disposeInputs(inputs);
+
+    const mimeType = usesMp4 ? "video/mp4" : "video/webm";
+    const fileExt = usesMp4 ? "mp4" : "webm";
+
+    if (target instanceof BufferTarget) {
+      const { buffer } = target;
+      if (!buffer) {
+        self.postMessage({
+          type: "error",
+          message: "Export buffer is empty. Something went wrong during encoding.",
+        });
+        return;
+      }
+      self.postMessage(
+        { type: "done", buffer, mimeType, fileExt, savedToDisk: false },
+        { transfer: [buffer] },
+      );
+    } else {
+      self.postMessage({ type: "done", mimeType, fileExt, savedToDisk: true });
+    }
+  } catch (err) {
+    await abortAndDispose(false);
+    if (!cancelled) {
+      const message =
+        err instanceof Error && err.message ? err.message : "Video export failed.";
+      self.postMessage({ type: "error", message });
+    }
   }
 }
 
@@ -544,7 +826,9 @@ self.onmessage = (e: MessageEvent) => {
   if (e.data?.type === "init") {
     run(e.data.payload as WorkerInitPayload).catch((err) => {
       if (!cancelled) {
-        self.postMessage({ type: "error", message: String(err) });
+        const message =
+          err instanceof Error && err.message ? err.message : "Video export failed.";
+        self.postMessage({ type: "error", message });
       }
     });
   }

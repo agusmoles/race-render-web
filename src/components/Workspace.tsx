@@ -24,6 +24,18 @@ import {
 import { parseTelemetryCSV, ParsedTelemetry } from "@/utils/csv-helper";
 import { autoSyncWithGpmf, AutoSyncResult } from "@/utils/gpmf-sync";
 import {
+  formatBitrateMbps,
+  formatCodecLabel,
+  formatResolutionTag,
+  normalizeEvenDimension,
+  sanitizeBitrate,
+  type ExportContainer,
+  type ExportEncodingInfo,
+  type ExportMode,
+  type ExportQualityPreset,
+  type SourceVideoProfile,
+} from "@/utils/export-config";
+import {
   analyzeSessionLaps,
   areTracksCompatible,
   buildReferenceLapTarget,
@@ -257,6 +269,22 @@ function resolveVideoClipPosition(globalTime: number, durations: number[]) {
   return { index: 0, localTime: 0 };
 }
 
+interface SaveFilePickerAcceptType {
+  description: string;
+  accept: Record<string, string[]>;
+}
+
+interface SaveFilePickerOptions {
+  suggestedName?: string;
+  types?: SaveFilePickerAcceptType[];
+}
+
+interface WindowWithSavePicker extends Window {
+  showSaveFilePicker?: (
+    options?: SaveFilePickerOptions,
+  ) => Promise<FileSystemFileHandle>;
+}
+
 function formatSyncMethodLabel(method: AutoSyncResult["method"]): string {
   if (method === "gopro-gps-speed") return "GoPro GPS";
   if (method === "gopro-gyro") return "GoPro Gyro";
@@ -281,7 +309,13 @@ export default function Workspace() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
-  const [exportQuality, setExportQuality] = useState<"standard" | "high" | "ultra">("high");
+  const [exportMode, setExportMode] = useState<ExportMode>("composite");
+  const [exportQuality, setExportQuality] = useState<ExportQualityPreset>("high");
+  const [sourceVideoProfile, setSourceVideoProfile] =
+    useState<SourceVideoProfile | null>(null);
+  const [canEncodeMp4, setCanEncodeMp4] = useState(true);
+  const [activeExportInfo, setActiveExportInfo] =
+    useState<ExportEncodingInfo | null>(null);
   const [uploadError, setUploadError] = useState("");
 
   // Sync Parameters
@@ -311,6 +345,8 @@ export default function Workspace() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement>(null);
   const exportWorkerRef = useRef<Worker | null>(null);
+  const exportCancelTimerRef = useRef<number | null>(null);
+  const videoInspectRunIdRef = useRef(0);
   const currentSessionKeyRef = useRef<string | null>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
   const overlayStageRef = useRef<HTMLDivElement>(null);
@@ -603,6 +639,71 @@ export default function Workspace() {
     void runAutoSync(files, durations, telemetry);
   };
 
+  const inspectLoadedVideoProfile = async (file: File) => {
+    const runId = ++videoInspectRunIdRef.current;
+    try {
+      const { Input, BlobSource, ALL_FORMATS, canEncodeVideo } = await import("mediabunny");
+      if (runId !== videoInspectRunIdRef.current) return;
+
+      const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+      try {
+        const track = await input.getPrimaryVideoTrack();
+        if (!track || runId !== videoInspectRunIdRef.current) return;
+
+        const [codec, rawW, rawH] = await Promise.all([
+          track.getCodec(),
+          track.getDisplayWidth().catch(() => 0),
+          track.getDisplayHeight().catch(() => 0),
+        ]);
+
+        let bitrate: number | null = null;
+        let fps: number | null = null;
+        try {
+          const stats = await track.computePacketStats(120);
+          bitrate = sanitizeBitrate(stats.averageBitrate, 500_000_000);
+          if (
+            Number.isFinite(stats.averagePacketRate) &&
+            stats.averagePacketRate >= 1 &&
+            stats.averagePacketRate <= 240
+          ) {
+            fps = stats.averagePacketRate;
+          }
+        } catch {
+          bitrate = null;
+        }
+
+        if (bitrate === null) {
+          const avg = await track.getAverageBitrate().catch(() => null);
+          bitrate = sanitizeBitrate(avg, 500_000_000);
+        }
+        if (bitrate === null) {
+          const peak = await track.getBitrate().catch(() => null);
+          bitrate = sanitizeBitrate(peak, 500_000_000);
+        }
+
+        const width = normalizeEvenDimension(rawW, 1920);
+        const height = normalizeEvenDimension(rawH, 1080);
+
+        const [avcOk, hevcOk] = await Promise.all([
+          canEncodeVideo("avc", { width, height }).catch(() => false),
+          canEncodeVideo("hevc", { width, height }).catch(() => false),
+        ]);
+
+        if (runId !== videoInspectRunIdRef.current) return;
+        setSourceVideoProfile({ codec, bitrate, width, height, fps });
+        setCanEncodeMp4(avcOk || hevcOk);
+      } finally {
+        if (Symbol.dispose in input) {
+          (input as Disposable)[Symbol.dispose]();
+        }
+      }
+    } catch {
+      if (runId === videoInspectRunIdRef.current) {
+        setSourceVideoProfile(null);
+      }
+    }
+  };
+
   const handleVideoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       videoUrls.forEach((url) => URL.revokeObjectURL(url));
@@ -618,7 +719,9 @@ export default function Workspace() {
       setVideoFiles(files);
       setVideoDurations([]);
       setVideoDuration(0);
+      setSourceVideoProfile(null);
       setAutoSyncState({ phase: "idle", result: null });
+      void inspectLoadedVideoProfile(files[0]);
       const urls = files.map((f) => URL.createObjectURL(f));
       setVideoUrls(urls);
       setActiveVideoIndex(0);
@@ -1010,6 +1113,10 @@ export default function Workspace() {
 
   useEffect(() => {
     return () => {
+      if (exportCancelTimerRef.current !== null) {
+        window.clearTimeout(exportCancelTimerRef.current);
+        exportCancelTimerRef.current = null;
+      }
       exportWorkerRef.current?.terminate();
       exportWorkerRef.current = null;
     };
@@ -1500,41 +1607,111 @@ export default function Workspace() {
     }
   };
 
-  const handleExportVideo = () => {
+  const cleanupExportWorker = () => {
+    if (exportCancelTimerRef.current !== null) {
+      window.clearTimeout(exportCancelTimerRef.current);
+      exportCancelTimerRef.current = null;
+    }
+    if (exportWorkerRef.current) {
+      exportWorkerRef.current.terminate();
+      exportWorkerRef.current = null;
+    }
+    setActiveExportInfo(null);
+    setIsExporting(false);
+  };
+
+  const handleCancelExport = () => {
+    const worker = exportWorkerRef.current;
+    if (!worker) {
+      cleanupExportWorker();
+      return;
+    }
+    worker.postMessage({ type: "cancel" });
+    if (exportCancelTimerRef.current !== null) {
+      window.clearTimeout(exportCancelTimerRef.current);
+    }
+    exportCancelTimerRef.current = window.setTimeout(() => {
+      cleanupExportWorker();
+    }, 1500);
+  };
+
+  const handleExportVideo = async () => {
     if (!videoRef.current || !localTelemetry || videoFiles.length === 0) {
       setUploadError("Please load both GoPro POV video and CSV Telemetry data first!");
       return;
     }
 
-    if (exportWorkerRef.current) {
-      exportWorkerRef.current.terminate();
-      exportWorkerRef.current = null;
+    const isAlphaOverlay = exportMode === "overlay-alpha";
+    const preferredContainer: ExportContainer = isAlphaOverlay
+      ? "webm"
+      : canEncodeMp4
+        ? "mp4"
+        : "webm";
+
+    let fileHandle: FileSystemFileHandle | undefined;
+    const pickerWindow =
+      typeof window !== "undefined" ? (window as WindowWithSavePicker) : null;
+
+    if (pickerWindow && typeof pickerWindow.showSaveFilePicker === "function") {
+      try {
+        fileHandle = await pickerWindow.showSaveFilePicker({
+          suggestedName: isAlphaOverlay
+            ? "hud_overlay.webm"
+            : `overlay_render.${preferredContainer}`,
+          types: isAlphaOverlay
+            ? [
+                {
+                  description: "Transparent WebM Video (VP9 Alpha)",
+                  accept: { "video/webm": [".webm"] },
+                },
+              ]
+            : preferredContainer === "mp4"
+              ? [
+                  {
+                    description: "MP4 Video",
+                    accept: { "video/mp4": [".mp4"] },
+                  },
+                ]
+              : [
+                  {
+                    description: "WebM Video",
+                    accept: { "video/webm": [".webm"] },
+                  },
+                ],
+        });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        fileHandle = undefined;
+      }
     }
+
+    setIsExportModalOpen(false);
+    cleanupExportWorker();
 
     setUploadError("");
     setIsExporting(true);
     setExportProgress(0);
+    setActiveExportInfo(null);
     setIsPlaying(false);
     videoRef.current.pause();
 
-    const canvasWidth = videoRef.current.videoWidth || 1280;
-    const canvasHeight = videoRef.current.videoHeight || 720;
+    const canvasWidth =
+      sourceVideoProfile?.width || videoRef.current.videoWidth || 1280;
+    const canvasHeight =
+      sourceVideoProfile?.height || videoRef.current.videoHeight || 720;
     const actualStart = exportStart;
     const actualEnd = exportEnd > 0 ? exportEnd : videoDuration;
-
-    const bitrates: Record<string, number> = {
-      standard: 15_000_000,
-      high: 30_000_000,
-      ultra: 50_000_000,
-    };
-    const targetBitrate = bitrates[exportQuality] || 30_000_000;
 
     const worker = new Worker(new URL("../workers/exportWorker.ts", import.meta.url));
     exportWorkerRef.current = worker;
 
     worker.onmessage = (e: MessageEvent) => {
       const data = e.data;
-      if (data?.type === "progress") {
+      if (data?.type === "info") {
+        setActiveExportInfo(data.info as ExportEncodingInfo);
+      } else if (data?.type === "progress") {
         setExportProgress(data.percent);
         if (data.previewBitmap) {
           const bitmap = data.previewBitmap as ImageBitmap;
@@ -1553,45 +1730,46 @@ export default function Workspace() {
           }
           bitmap.close();
         }
+      } else if (data?.type === "cancelled") {
+        if (exportWorkerRef.current === worker) {
+          cleanupExportWorker();
+        }
       } else if (data?.type === "done") {
-        const { buffer, mimeType, fileExt } = data as {
+        const { buffer, mimeType, fileExt, savedToDisk } = data as {
           buffer?: ArrayBuffer;
           mimeType: string;
           fileExt: string;
+          savedToDisk?: boolean;
         };
-        if (buffer) {
+        if (!savedToDisk && buffer) {
           const blob = new Blob([buffer], { type: mimeType });
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
-          a.download = `overlay_render.${fileExt}`;
+          a.download = isAlphaOverlay
+            ? "hud_overlay.webm"
+            : `overlay_render.${fileExt}`;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
         }
-        worker.terminate();
         if (exportWorkerRef.current === worker) {
-          exportWorkerRef.current = null;
+          cleanupExportWorker();
         }
-        setIsExporting(false);
       } else if (data?.type === "error") {
         setUploadError(data.message || "Video export failed.");
-        worker.terminate();
         if (exportWorkerRef.current === worker) {
-          exportWorkerRef.current = null;
+          cleanupExportWorker();
         }
-        setIsExporting(false);
       }
     };
 
     worker.onerror = (err) => {
       setUploadError(err.message || "Export worker encountered an unexpected error.");
-      worker.terminate();
       if (exportWorkerRef.current === worker) {
-        exportWorkerRef.current = null;
+        cleanupExportWorker();
       }
-      setIsExporting(false);
     };
 
     worker.postMessage({
@@ -1618,7 +1796,11 @@ export default function Workspace() {
         canvasWidth,
         canvasHeight,
         videoDurations,
-        targetBitrate,
+        exportMode,
+        exportQuality,
+        preferredContainer: fileHandle ? preferredContainer : null,
+        sourceProfile: sourceVideoProfile,
+        fileHandle,
         referenceLap: activeReferenceLap,
         showGhostOnMap,
       },
@@ -1835,10 +2017,17 @@ export default function Workspace() {
                   <h3 className="text-sm font-black uppercase tracking-wider text-zinc-100">
                     Trim & Render Overlay Video
                   </h3>
+                  {sourceVideoProfile && (
+                    <span className="hidden sm:inline-flex items-center text-[9px] font-mono font-bold text-cyan-300 bg-cyan-400/10 border border-cyan-400/30 px-2 py-0.5 rounded-md">
+                      {formatResolutionTag(sourceVideoProfile.width, sourceVideoProfile.height)}
+                      {sourceVideoProfile.fps ? ` • ${Math.round(sourceVideoProfile.fps)}fps` : ""}
+                      {sourceVideoProfile.codec ? ` • ${formatCodecLabel(sourceVideoProfile.codec)}` : ""}
+                      {sourceVideoProfile.bitrate ? ` • ${formatBitrateMbps(sourceVideoProfile.bitrate)}` : ""}
+                    </span>
+                  )}
                 </div>
                 <p className="text-[9px] text-zinc-550 uppercase tracking-wider mt-0.5 ml-6 font-semibold">
-                  Preview video, select start/end crop marks, and export in
-                  ultra-high quality
+                  Match original source quality or export a transparent HUD overlay for NLE compositing
                 </p>
               </div>
               <button
@@ -2227,47 +2416,158 @@ export default function Workspace() {
                   </div>
                 </div>
               </div>
+
+              <div className="flex flex-col space-y-2.5 bg-zinc-950/40 border border-zinc-800/80 p-4 rounded-2xl">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-zinc-400 font-black uppercase tracking-wider flex items-center space-x-1.5">
+                    <Layers size={11} className="text-cyan-400" />
+                    <span>Output Mode</span>
+                  </span>
+                  <span className="text-[9px] font-mono text-zinc-500">
+                    {exportMode === "overlay-alpha"
+                      ? "WebM VP9 + Alpha • No Video Re-encode"
+                      : exportQuality === "original"
+                        ? "Matches Source Codec & Bitrate"
+                        : "Hardware WebCodecs • Lossless Audio"}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setExportMode("composite")}
+                    className={`text-left p-3 rounded-xl border transition cursor-pointer ${
+                      exportMode === "composite"
+                        ? "bg-cyan-400/10 border-cyan-400/60 text-zinc-100 shadow-[0_0_12px_rgba(34,211,238,0.12)]"
+                        : "bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase tracking-wider">
+                        Video + HUD
+                      </span>
+                      <span className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-cyan-400">
+                        {canEncodeMp4 ? "MP4" : "WebM"}
+                      </span>
+                    </div>
+                    <p className="text-[9px] text-zinc-400 mt-1 leading-relaxed">
+                      Burns gauges onto your footage with lossless audio passthrough. Use Original to match source bitrate &amp; HEVC.
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExportMode("overlay-alpha")}
+                    className={`text-left p-3 rounded-xl border transition cursor-pointer ${
+                      exportMode === "overlay-alpha"
+                        ? "bg-cyan-400/10 border-cyan-400/60 text-zinc-100 shadow-[0_0_12px_rgba(34,211,238,0.12)]"
+                        : "bg-zinc-950/80 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-black uppercase tracking-wider">
+                        Transparent HUD Only
+                      </span>
+                      <span className="text-[8px] font-mono uppercase px-1.5 py-0.5 rounded bg-zinc-900 border border-emerald-500/40 text-emerald-400">
+                        Alpha WebM
+                      </span>
+                    </div>
+                    <p className="text-[9px] text-zinc-400 mt-1 leading-relaxed">
+                      Gauges on transparent background for DaVinci Resolve, Premiere &amp; Final Cut. Keeps original 10-bit/HDR footage untouched.
+                    </p>
+                  </button>
+                </div>
+              </div>
             </div>
 
-            {/* Footer */}
-            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex justify-between items-center rounded-b-3xl">
+            <div className="px-6 py-4 bg-zinc-950 border-t border-zinc-800 flex flex-wrap justify-between items-center gap-3 rounded-b-3xl">
               <div className="flex items-center space-x-2">
                 <span className="text-[9px] text-zinc-500 uppercase font-black tracking-wider">Quality:</span>
-                <div className="flex space-x-1">
-                  {(["standard", "high", "ultra"] as const).map((q) => (
-                    <button
-                      key={q}
-                      onClick={() => setExportQuality(q)}
-                      className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition cursor-pointer border ${
-                        exportQuality === q
-                          ? "bg-cyan-400/15 border-cyan-400/50 text-cyan-400"
-                          : "bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
-                      }`}
-                    >
-                      {q === "standard" ? "Standard" : q === "high" ? "High" : "Ultra"}
-                      <span className="ml-1 text-[7px] font-mono opacity-60">
-                        {q === "standard" ? "15Mb" : q === "high" ? "30Mb" : "50Mb"}
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                {exportMode === "composite" ? (
+                  <div className="flex flex-wrap gap-1">
+                    {(["standard", "high", "ultra", "original"] as const).map((q) => {
+                      const originalBadge = sourceVideoProfile?.bitrate
+                        ? `${Math.round(sourceVideoProfile.bitrate / 1_000_000)}Mb`
+                        : "Match";
+                      return (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setExportQuality(q)}
+                          className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition cursor-pointer border ${
+                            exportQuality === q
+                              ? q === "original"
+                                ? "bg-emerald-500/15 border-emerald-400/60 text-emerald-300"
+                                : "bg-cyan-400/15 border-cyan-400/50 text-cyan-400"
+                              : "bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+                          }`}
+                        >
+                          {q === "standard"
+                            ? "Standard"
+                            : q === "high"
+                              ? "High"
+                              : q === "ultra"
+                                ? "Ultra"
+                                : "Original"}
+                          <span className="ml-1 text-[7px] font-mono opacity-70">
+                            {q === "standard"
+                              ? "15Mb"
+                              : q === "high"
+                                ? "30Mb"
+                                : q === "ultra"
+                                  ? "50Mb"
+                                  : originalBadge}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-1">
+                    {(["standard", "high", "ultra"] as const).map((q) => {
+                      const isActive =
+                        exportQuality === q ||
+                        (q === "ultra" && exportQuality === "original");
+                      return (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setExportQuality(q)}
+                          className={`px-2.5 py-1 rounded-lg text-[9px] font-black uppercase tracking-wider transition cursor-pointer border ${
+                            isActive
+                              ? "bg-cyan-400/15 border-cyan-400/50 text-cyan-400"
+                              : "bg-zinc-950 border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700"
+                          }`}
+                        >
+                          {q === "standard" ? "Standard" : q === "high" ? "High" : "Ultra"}
+                          <span className="ml-1 text-[7px] font-mono opacity-70">
+                            {q === "standard" ? "10Mb" : q === "high" ? "20Mb" : "35Mb"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <div className="flex space-x-3">
                 <button
+                  type="button"
                   onClick={() => setIsExportModalOpen(false)}
                   className="px-4 py-2 border border-zinc-850 hover:bg-zinc-900 text-zinc-300 font-extrabold text-[10px] uppercase tracking-wider rounded-xl transition cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
+                  type="button"
                   onClick={() => {
-                    setIsExportModalOpen(false);
-                    handleExportVideo();
+                    void handleExportVideo();
                   }}
                   className="bg-cyan-400 hover:bg-cyan-500 text-zinc-950 font-black px-6 py-2 rounded-xl text-[10px] uppercase tracking-wider transition cursor-pointer shadow-[0_0_15px_rgba(34,211,238,0.25)] flex items-center space-x-1.5"
                 >
                   <Download size={12} />
-                  <span>Start GPU Render</span>
+                  <span>
+                    {exportMode === "overlay-alpha"
+                      ? "Export Transparent HUD"
+                      : "Start GPU Render"}
+                  </span>
                 </button>
               </div>
             </div>
@@ -2275,18 +2575,21 @@ export default function Workspace() {
         </div>
       )}
 
-      {/* Exporter Progress HUD overlay modal */}
       {isExporting && (
         <div className="absolute inset-0 bg-zinc-950/95 flex flex-col items-center justify-center z-50 rounded-3xl border border-zinc-800 p-6">
           <div className="p-6 bg-zinc-900/90 backdrop-blur-md border border-zinc-800 rounded-3xl text-center space-y-5 max-w-xl w-full shadow-2xl relative flex flex-col items-center">
             <div className="flex items-center space-x-3">
               <RefreshCw size={24} className="animate-spin text-cyan-400" />
-              <div>
+              <div className="text-left">
                 <h3 className="text-sm font-black uppercase tracking-wider text-zinc-100">
-                  Exporting Telemetry Overlay
+                  {activeExportInfo?.mode === "overlay-alpha"
+                    ? "Exporting Transparent HUD Overlay"
+                    : "Exporting Telemetry Overlay"}
                 </h3>
-                <p className="text-[10px] text-zinc-500 uppercase font-semibold tracking-wider mt-0.5">
-                  Offline WebCodecs Hardware Render (Background Worker)
+                <p className="text-[10px] text-zinc-400 font-mono font-semibold tracking-wider mt-0.5">
+                  {activeExportInfo
+                    ? `${activeExportInfo.width}×${activeExportInfo.height} • ${formatCodecLabel(activeExportInfo.codec)}${activeExportInfo.mode === "overlay-alpha" ? " Alpha" : ""} • ${activeExportInfo.bitrate === "auto" ? "Auto High" : formatBitrateMbps(activeExportInfo.bitrate)}${activeExportInfo.streamingToDisk ? " • Direct to Disk" : ""}`
+                    : "Initializing WebCodecs Hardware Render..."}
                 </p>
               </div>
             </div>
@@ -2301,7 +2604,9 @@ export default function Workspace() {
               <div className="absolute top-3 left-3 px-2 py-1 bg-black/70 backdrop-blur-md rounded-md border border-zinc-800 flex items-center space-x-1.5 pointer-events-none">
                 <span className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" />
                 <span className="text-[8px] font-black tracking-wider uppercase text-zinc-300">
-                  Live Render Preview
+                  {activeExportInfo?.mode === "overlay-alpha"
+                    ? "Transparent Alpha Preview"
+                    : "Live Render Preview"}
                 </span>
               </div>
             </div>
@@ -2316,7 +2621,9 @@ export default function Workspace() {
               <div className="flex justify-between items-center text-xs font-mono font-bold text-zinc-400">
                 <span>{exportProgress}% Completed</span>
                 <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">
-                  Active WebCodecs Render
+                  {activeExportInfo?.streamingToDisk
+                    ? "Streaming to Disk"
+                    : "Active WebCodecs Render"}
                 </span>
               </div>
             </div>
@@ -2333,14 +2640,8 @@ export default function Workspace() {
             </div>
 
             <button
-              onClick={() => {
-                if (exportWorkerRef.current) {
-                  exportWorkerRef.current.postMessage({ type: "cancel" });
-                  exportWorkerRef.current.terminate();
-                  exportWorkerRef.current = null;
-                }
-                setIsExporting(false);
-              }}
+              type="button"
+              onClick={handleCancelExport}
               className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 hover:text-rose-200 font-extrabold text-xs px-8 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"
             >
               <X size={14} />
