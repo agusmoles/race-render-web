@@ -309,6 +309,8 @@ export default function Workspace() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [hasRenderedExportFrame, setHasRenderedExportFrame] = useState(false);
+  const [isFinalizingExport, setIsFinalizingExport] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode>("composite");
   const [exportQuality, setExportQuality] = useState<ExportQualityPreset>("high");
   const [sourceVideoProfile, setSourceVideoProfile] =
@@ -1617,7 +1619,16 @@ export default function Workspace() {
       exportWorkerRef.current = null;
     }
     setActiveExportInfo(null);
+    setHasRenderedExportFrame(false);
+    setIsFinalizingExport(false);
     setIsExporting(false);
+  };
+
+  const handleStopAndSaveExport = () => {
+    const worker = exportWorkerRef.current;
+    if (!worker || isFinalizingExport) return;
+    setIsFinalizingExport(true);
+    worker.postMessage({ type: "stop-and-save" });
   };
 
   const handleCancelExport = () => {
@@ -1632,7 +1643,7 @@ export default function Workspace() {
     }
     exportCancelTimerRef.current = window.setTimeout(() => {
       cleanupExportWorker();
-    }, 1500);
+    }, 2500);
   };
 
   const handleExportVideo = async () => {
@@ -1693,6 +1704,8 @@ export default function Workspace() {
     setUploadError("");
     setIsExporting(true);
     setExportProgress(0);
+    setHasRenderedExportFrame(false);
+    setIsFinalizingExport(false);
     setActiveExportInfo(null);
     setIsPlaying(false);
     videoRef.current.pause();
@@ -1711,7 +1724,10 @@ export default function Workspace() {
       const data = e.data;
       if (data?.type === "info") {
         setActiveExportInfo(data.info as ExportEncodingInfo);
+      } else if (data?.type === "finalizing") {
+        setIsFinalizingExport(true);
       } else if (data?.type === "progress") {
+        setHasRenderedExportFrame(true);
         setExportProgress(data.percent);
         if (data.previewBitmap) {
           const bitmap = data.previewBitmap as ImageBitmap;
@@ -2618,9 +2634,11 @@ export default function Workspace() {
               <div className="flex justify-between items-center text-xs font-mono font-bold text-zinc-400">
                 <span>{exportProgress}% Completed</span>
                 <span className="text-[10px] text-cyan-400 tracking-wider font-sans uppercase">
-                  {activeExportInfo?.streamingToDisk
-                    ? "Streaming to Disk"
-                    : "Active WebCodecs Render"}
+                  {isFinalizingExport
+                    ? "Finalizing Video..."
+                    : activeExportInfo?.streamingToDisk
+                      ? "Streaming to Disk"
+                      : "Active WebCodecs Render"}
                 </span>
               </div>
             </div>
@@ -2636,14 +2654,26 @@ export default function Workspace() {
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={handleCancelExport}
-              className="bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800 text-rose-300 hover:text-rose-200 font-extrabold text-xs px-8 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"
-            >
-              <X size={14} />
-              <span>Cancel Export</span>
-            </button>
+            <div className="flex flex-wrap items-center justify-center gap-3 w-full">
+              <button
+                type="button"
+                onClick={handleStopAndSaveExport}
+                disabled={!hasRenderedExportFrame || isFinalizingExport}
+                className="bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-40 disabled:cursor-not-allowed border border-emerald-500/50 text-emerald-300 font-extrabold text-xs px-6 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"
+              >
+                <Download size={14} />
+                <span>{isFinalizingExport ? "Finalizing..." : "Stop & Save So Far"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelExport}
+                disabled={isFinalizingExport}
+                className="bg-rose-950/40 hover:bg-rose-900/60 disabled:opacity-40 disabled:cursor-not-allowed border border-rose-800 text-rose-300 hover:text-rose-200 font-extrabold text-xs px-6 py-2.5 rounded-xl uppercase tracking-wider transition cursor-pointer flex items-center space-x-2"
+              >
+                <X size={14} />
+                <span>Cancel &amp; Discard</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

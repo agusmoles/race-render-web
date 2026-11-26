@@ -97,6 +97,7 @@ const MAX_SOURCE_BITRATE_CAP = 500_000_000;
 
 let fontsLoadPromise: Promise<void> | null = null;
 let cancelled = false;
+let stopRequested = false;
 
 async function ensureWorkerFonts(): Promise<void> {
   if (!("fonts" in self) || typeof FontFace === "undefined") return;
@@ -489,7 +490,7 @@ async function collectClipFrameTimings(
     for await (const pkt of packetSink.packets(startPacket ?? undefined, undefined, {
       metadataOnly: true,
     })) {
-      if (cancelled) return [];
+      if (cancelled || stopRequested) return [];
       if (pkt.timestamp >= clipStart - 1 && pkt.timestamp <= clipEnd + 1) {
         rawSamples.push({
           timestamp: pkt.timestamp,
@@ -508,6 +509,7 @@ async function collectClipFrameTimings(
 
 async function run(payload: WorkerInitPayload) {
   cancelled = false;
+  stopRequested = false;
   await ensureWorkerFonts();
 
   const {
@@ -548,6 +550,7 @@ async function run(payload: WorkerInitPayload) {
   );
 
   let ownedWritable: FileSystemWritableFileStream | null = null;
+  let shouldCommitFile = false;
   let output: Output | null = null;
   let outputStarted = false;
   let gpuPremultiplier: GpuAlphaPremultiplier | null = null;
@@ -656,8 +659,24 @@ async function run(payload: WorkerInitPayload) {
     let streamingToDisk = false;
 
     if (fileHandle) {
-      ownedWritable = await fileHandle.createWritable();
-      target = new StreamTarget(ownedWritable, { chunked: true });
+      const diskWritable = await fileHandle.createWritable();
+      ownedWritable = diskWritable;
+      const managedWritable = new WritableStream<StreamTargetChunk>({
+        async write(chunk) {
+          await diskWritable.write(chunk);
+        },
+        async close() {
+          if (shouldCommitFile) {
+            await diskWritable.close();
+          } else {
+            await diskWritable.abort();
+          }
+        },
+        async abort(reason) {
+          await diskWritable.abort(reason);
+        },
+      });
+      target = new StreamTarget(managedWritable, { chunked: true });
       streamingToDisk = true;
     } else if (writableStream) {
       target = new StreamTarget(writableStream, { chunked: true });
@@ -855,6 +874,9 @@ async function run(payload: WorkerInitPayload) {
         await abortAndDispose(true);
         return;
       }
+      if (stopRequested) {
+        break;
+      }
 
       const input = inputs[vi];
       const videoDuration = videoDurations[vi] ?? 0;
@@ -885,15 +907,24 @@ async function run(payload: WorkerInitPayload) {
           await abortAndDispose(true);
           return;
         }
+        if (stopRequested) {
+          break;
+        }
 
         for (const frame of frameTimings) {
           if (cancelled) {
             await abortAndDispose(true);
             return;
           }
+          if (stopRequested) {
+            break;
+          }
           await encodeHudFrame(videoStartInGlobal + frame.timestamp, frame.duration);
         }
 
+        if (stopRequested) {
+          break;
+        }
         cumulativeVideoOffset += videoDuration;
         continue;
       }
@@ -943,6 +974,9 @@ async function run(payload: WorkerInitPayload) {
           await abortAndDispose(true);
           return;
         }
+        if (stopRequested) {
+          break;
+        }
 
         const localFrameTs = wrappedCanvas.timestamp;
         if (localFrameTs < clipStart) {
@@ -972,6 +1006,10 @@ async function run(payload: WorkerInitPayload) {
         );
       }
 
+      if (stopRequested) {
+        break;
+      }
+
       if (audioSource && audioPacketSink && nextAudioPacket) {
         while (nextAudioPacket && nextAudioPacket.timestamp <= clipEnd) {
           await flushAudioPacket(nextAudioPacket);
@@ -983,11 +1021,16 @@ async function run(payload: WorkerInitPayload) {
       cumulativeVideoOffset += videoDuration;
     }
 
-    if (cancelled) {
+    if (cancelled || (stopRequested && globalFrameIndex === 0)) {
       await abortAndDispose(true);
       return;
     }
 
+    if (stopRequested) {
+      self.postMessage({ type: "finalizing" });
+    }
+
+    shouldCommitFile = true;
     await output.finalize();
     gpuPremultiplier?.dispose();
     gpuPremultiplier = null;
@@ -1006,13 +1049,20 @@ async function run(payload: WorkerInitPayload) {
         return;
       }
       self.postMessage(
-        { type: "done", buffer, mimeType, fileExt, savedToDisk: false },
+        { type: "done", buffer, mimeType, fileExt, savedToDisk: false, partial: stopRequested },
         { transfer: [buffer] },
       );
     } else {
-      self.postMessage({ type: "done", mimeType, fileExt, savedToDisk: true });
+      self.postMessage({
+        type: "done",
+        mimeType,
+        fileExt,
+        savedToDisk: true,
+        partial: stopRequested,
+      });
     }
   } catch (err) {
+    shouldCommitFile = false;
     await abortAndDispose(false);
     if (!cancelled) {
       const message =
@@ -1025,6 +1075,10 @@ async function run(payload: WorkerInitPayload) {
 self.onmessage = (e: MessageEvent) => {
   if (e.data?.type === "cancel") {
     cancelled = true;
+    return;
+  }
+  if (e.data?.type === "stop-and-save") {
+    stopRequested = true;
     return;
   }
   if (e.data?.type === "init") {
