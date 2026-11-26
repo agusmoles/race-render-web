@@ -260,6 +260,158 @@ function drawPreviewCheckerboard(
   }
 }
 
+class GpuAlphaPremultiplier {
+  readonly canvas: OffscreenCanvas;
+  private gl: WebGL2RenderingContext | null;
+  private program: WebGLProgram | null = null;
+  private vao: WebGLVertexArrayObject | null = null;
+  private vbo: WebGLBuffer | null = null;
+  private texture: WebGLTexture | null = null;
+
+  constructor(width: number, height: number) {
+    this.canvas = new OffscreenCanvas(width, height);
+    const gl = this.canvas.getContext("webgl2", {
+      alpha: true,
+      premultipliedAlpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: true,
+    });
+    if (!gl) {
+      throw new Error("WebGL2 unavailable");
+    }
+    this.gl = gl;
+
+    const vertSrc = `#version 300 es
+      in vec2 a_pos;
+      in vec2 a_uv;
+      out vec2 v_uv;
+      void main() {
+        gl_Position = vec4(a_pos, 0.0, 1.0);
+        v_uv = a_uv;
+      }`;
+    const fragSrc = `#version 300 es
+      precision highp float;
+      uniform sampler2D u_tex;
+      in vec2 v_uv;
+      out vec4 fragColor;
+      void main() {
+        vec4 c = texture(u_tex, v_uv);
+        fragColor = c.a > 0.0 ? c : vec4(0.0);
+      }`;
+
+    const vs = this.compileShader(gl, gl.VERTEX_SHADER, vertSrc);
+    const fs = this.compileShader(gl, gl.FRAGMENT_SHADER, fragSrc);
+    const program = gl.createProgram();
+    if (!program) {
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      throw new Error("Failed to create WebGL2 program");
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      gl.deleteProgram(program);
+      throw new Error("Failed to link WebGL2 premultiply program");
+    }
+    this.program = program;
+
+    const vao = gl.createVertexArray();
+    const vbo = gl.createBuffer();
+    const texture = gl.createTexture();
+    if (!vao || !vbo || !texture) {
+      this.dispose();
+      throw new Error("Failed to allocate WebGL2 resources");
+    }
+    this.vao = vao;
+    this.vbo = vbo;
+    this.texture = texture;
+
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([
+        -1, -1, 0, 1,
+        1, -1, 1, 1,
+        -1, 1, 0, 0,
+        1, 1, 1, 0,
+      ]),
+      gl.STATIC_DRAW,
+    );
+
+    const posLoc = gl.getAttribLocation(program, "a_pos");
+    const uvLoc = gl.getAttribLocation(program, "a_uv");
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(uvLoc);
+    gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 16, 8);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, "u_tex"), 0);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+    gl.disable(gl.BLEND);
+    gl.viewport(0, 0, width, height);
+  }
+
+  private compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error("Failed to create WebGL2 shader");
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      gl.deleteShader(shader);
+      throw new Error("Failed to compile WebGL2 shader");
+    }
+    return shader;
+  }
+
+  update(source: OffscreenCanvas): void {
+    const gl = this.gl;
+    if (!gl || !this.texture || !this.program || !this.vao) return;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.useProgram(this.program);
+    gl.bindVertexArray(this.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  dispose(): void {
+    const gl = this.gl;
+    if (!gl) return;
+    if (this.texture) gl.deleteTexture(this.texture);
+    if (this.vbo) gl.deleteBuffer(this.vbo);
+    if (this.vao) gl.deleteVertexArray(this.vao);
+    if (this.program) gl.deleteProgram(this.program);
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    this.texture = null;
+    this.vbo = null;
+    this.vao = null;
+    this.program = null;
+    this.gl = null;
+  }
+}
+
+function tryCreateGpuPremultiplier(width: number, height: number): GpuAlphaPremultiplier | null {
+  try {
+    return new GpuAlphaPremultiplier(width, height);
+  } catch {
+    return null;
+  }
+}
+
 async function inspectSourceTrack(
   track: InputVideoTrack,
   fallbackWidth: number,
@@ -398,6 +550,7 @@ async function run(payload: WorkerInitPayload) {
   let ownedWritable: FileSystemWritableFileStream | null = null;
   let output: Output | null = null;
   let outputStarted = false;
+  let gpuPremultiplier: GpuAlphaPremultiplier | null = null;
 
   const abortAndDispose = async (sendCancelled: boolean) => {
     try {
@@ -409,6 +562,8 @@ async function run(payload: WorkerInitPayload) {
     } catch {
       // ignore cleanup errors on cancel
     } finally {
+      gpuPremultiplier?.dispose();
+      gpuPremultiplier = null;
       disposeInputs(inputs);
     }
     if (sendCancelled) {
@@ -476,10 +631,14 @@ async function run(payload: WorkerInitPayload) {
       : getContainerForCodec(videoCodec);
     const usesMp4 = container === "mp4";
 
+    gpuPremultiplier = isAlphaOverlay
+      ? tryCreateGpuPremultiplier(evenWidth, evenHeight)
+      : null;
+
     const offscreen = new OffscreenCanvas(evenWidth, evenHeight);
     const ctx = offscreen.getContext("2d", {
       alpha: isAlphaOverlay,
-      willReadFrequently: isAlphaOverlay,
+      willReadFrequently: isAlphaOverlay && !gpuPremultiplier,
     })!;
 
     const previewW = 640;
@@ -509,7 +668,8 @@ async function run(payload: WorkerInitPayload) {
 
     output = new Output({ format: outputFormat, target });
 
-    const videoSampleSource = isAlphaOverlay
+    const useCpuAlphaFallback = isAlphaOverlay && !gpuPremultiplier;
+    const videoSampleSource = useCpuAlphaFallback
       ? new VideoSampleSource({
           codec: videoCodec,
           bitrate: effectiveBitrate,
@@ -518,13 +678,14 @@ async function run(payload: WorkerInitPayload) {
           alpha: "keep",
         })
       : null;
-    const canvasSource = isAlphaOverlay
+    const canvasSource = useCpuAlphaFallback
       ? null
-      : new CanvasSource(offscreen, {
+      : new CanvasSource(gpuPremultiplier ? gpuPremultiplier.canvas : offscreen, {
           codec: videoCodec,
           bitrate: effectiveBitrate,
           keyFrameInterval: 2,
           latencyMode: "quality",
+          ...(isAlphaOverlay ? { alpha: "keep" as const } : {}),
         });
 
     if (videoSampleSource) {
@@ -653,6 +814,9 @@ async function run(payload: WorkerInitPayload) {
           sample.close();
         }
       } else if (canvasSource) {
+        if (gpuPremultiplier) {
+          gpuPremultiplier.update(offscreen);
+        }
         await canvasSource.add(exportRelativeTs, frameDuration);
       }
 
@@ -825,6 +989,8 @@ async function run(payload: WorkerInitPayload) {
     }
 
     await output.finalize();
+    gpuPremultiplier?.dispose();
+    gpuPremultiplier = null;
     disposeInputs(inputs);
 
     const mimeType = usesMp4 ? "video/mp4" : "video/webm";
