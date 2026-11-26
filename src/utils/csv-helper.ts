@@ -10,7 +10,13 @@ export interface TelemetryRow {
   lap: number;
   distance: number;
   segmentTime: number;
+  altitude?: number;
+  heading?: number;
+  slope?: number;
+  steering?: number;
 }
+
+const MAX_CSV_ROWS = 250_000;
 
 export interface ParsedTelemetry {
   headers: string[];
@@ -37,6 +43,10 @@ interface ChannelIndices {
   lap: number;
   dist: number;
   segmentTime: number;
+  altitude: number;
+  heading: number;
+  slope: number;
+  steering: number;
 }
 
 function parseFloatClean(val: string): number {
@@ -184,12 +194,17 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
     lap: indices.lap !== -1 ? headers[indices.lap] : "",
     dist: indices.dist !== -1 ? headers[indices.dist] : "",
     segmentTime: indices.segmentTime !== -1 ? headers[indices.segmentTime] : "",
+    altitude: indices.altitude !== -1 ? headers[indices.altitude] : "",
+    heading: indices.heading !== -1 ? headers[indices.heading] : "",
+    slope: indices.slope !== -1 ? headers[indices.slope] : "",
+    steering: indices.steering !== -1 ? headers[indices.steering] : "",
   };
 
   const rows: TelemetryRow[] = [];
   const rawDistValues: number[] = [];
 
   for (let i = dataStartIndex; i < lines.length; i++) {
+    if (rows.length >= MAX_CSV_ROWS) break;
     const line = lines[i].trim();
     if (!line) continue;
 
@@ -215,6 +230,14 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       indices.lap !== -1 ? Math.round(parseFloatClean(parts[indices.lap])) : 1;
     const segmentTime =
       indices.segmentTime !== -1 ? parseFloatClean(parts[indices.segmentTime]) : 0;
+    const altitude =
+      indices.altitude !== -1 ? parseFloatClean(parts[indices.altitude]) : undefined;
+    const heading =
+      indices.heading !== -1 ? parseFloatClean(parts[indices.heading]) : undefined;
+    const slope =
+      indices.slope !== -1 ? parseFloatClean(parts[indices.slope]) : undefined;
+    const steering =
+      indices.steering !== -1 ? parseFloatClean(parts[indices.steering]) : undefined;
 
     if (indices.dist !== -1) {
       rawDistValues.push(parseFloatClean(parts[indices.dist]));
@@ -232,6 +255,10 @@ export function parseTelemetryCSV(csvText: string): ParsedTelemetry {
       lap,
       distance: indices.dist !== -1 ? parseFloatClean(parts[indices.dist]) : 0,
       segmentTime,
+      altitude,
+      heading,
+      slope,
+      steering,
     });
   }
 
@@ -415,6 +442,10 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
     lap: -1,
     dist: -1,
     segmentTime: -1,
+    altitude: -1,
+    heading: -1,
+    slope: -1,
+    steering: -1,
   };
 
   for (let i = 0; i < headers.length; i++) {
@@ -544,6 +575,33 @@ function detectChannelIndices(headers: string[]): ChannelIndices {
         name === "segment")
     ) {
       indices.segmentTime = i;
+    }
+    else if (
+      indices.altitude === -1 &&
+      (name.includes("altitude") ||
+        name === "alt" ||
+        name === "gps_alt" ||
+        name.includes("gps alt"))
+    ) {
+      indices.altitude = i;
+    }
+    else if (
+      indices.heading === -1 &&
+      (name.includes("heading") || name === "hdg" || name === "gps_heading")
+    ) {
+      indices.heading = i;
+    }
+    else if (
+      indices.slope === -1 &&
+      (name.includes("slope") || name === "gps_slope")
+    ) {
+      indices.slope = i;
+    }
+    else if (
+      indices.steering === -1 &&
+      (name.includes("steering") || name.includes("steer"))
+    ) {
+      indices.steering = i;
     }
   }
 
