@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import LapCompareStudio from "@/components/LapCompareStudio";
+import StudioFooter from "@/components/StudioFooter";
 import StudioHeader from "@/components/StudioHeader";
 
 export const metadata: Metadata = {
@@ -17,12 +18,7 @@ export default function ComparePage() {
         <LapCompareStudio />
       </div>
 
-      <footer className="w-full mt-auto border-t border-zinc-900/60 py-6 text-center select-none">
-        <p className="text-[9px] text-zinc-650 uppercase tracking-widest font-bold">
-          Open RaceRender Web • 3D Multi-CSV Telemetry Comparator • Powered by
-          Three.js
-        </p>
-      </footer>
+      <StudioFooter subtitle="3D Multi-CSV Telemetry Comparator • Powered by Three.js" />
     </main>
   );
 }

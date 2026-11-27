@@ -1,3 +1,4 @@
+import StudioFooter from "@/components/StudioFooter";
 import StudioHeader from "@/components/StudioHeader";
 import Workspace from "@/components/Workspace";
 import { Flame } from "lucide-react";
@@ -18,7 +19,7 @@ export default function Home() {
           <iframe
             width="100%"
             height="100%"
-            src="https://www.youtube.com/embed/31G7PHYFvWI"
+            src="https://www.youtube.com/embed/5IOPWy-HYgY?start=1336"
             title="Open RaceRender Example Video"
             frameBorder="0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
@@ -27,12 +28,7 @@ export default function Home() {
         </div>
       </section>
 
-      <footer className="w-full mt-auto border-t border-zinc-900/60 py-6 text-center select-none">
-        <p className="text-[9px] text-zinc-650 uppercase tracking-widest font-bold">
-          Open RaceRender Web • Crafted with precision • GPU Accelerated
-          Rendering
-        </p>
-      </footer>
+      <StudioFooter subtitle="Crafted with precision • GPU Accelerated Rendering" />
     </main>
   );
 }

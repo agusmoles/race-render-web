@@ -8,9 +8,9 @@ export const metadata: Metadata = {
   description:
     "Synchronize and render beautiful RPM, Speedometer, G-force, Delta Bar, and track map telemetry overlays onto POV racing videos, fully client-side.",
   keywords: ["racing", "telemetry", "overlay", "hud", "tools", "render"],
-  authors: [{ name: "Agustin Moles", url: "https://agustinmoles.com.ar" }],
-  creator: "Agustin Moles",
-  publisher: "Agustin Moles",
+  authors: [{ name: "Agustín Molés", url: "https://agustinmoles.com.ar" }],
+  creator: "Agustín Molés",
+  publisher: "Agustín Molés",
   robots: "index,follow",
   metadataBase: "https://openracerender.com/",
 };
